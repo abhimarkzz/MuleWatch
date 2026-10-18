@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabase-admin";
+import { timingSafeEqual } from "node:crypto";
 
 const RENDER_API_URL = (
   process.env.RENDER_API_URL ??
@@ -60,7 +61,30 @@ function validOptionalId(
   );
 }
 
+
 export async function POST(request: Request) {
+  const expectedKey = process.env.MULEWATCH_API_KEY;
+const suppliedKey = request.headers.get("x-api-key") ?? "";
+
+if (!expectedKey) {
+  return NextResponse.json(
+    { error: "API authentication is not configured." },
+    { status: 503 }
+  );
+}
+
+const supplied = Buffer.from(suppliedKey);
+const expected = Buffer.from(expectedKey);
+
+if (
+  supplied.length !== expected.length ||
+  !timingSafeEqual(supplied, expected)
+) {
+  return NextResponse.json(
+    { error: "Unauthorized" },
+    { status: 401 }
+  );
+}
   // 1. Parse and validate incoming JSON.
   let rawBody: unknown;
 
