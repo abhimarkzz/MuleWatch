@@ -1,5 +1,6 @@
 "use client";
 
+import PredictionPanel from "@/components/PredictionPanel";
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import AlertQueue from "@/components/AlertQueue";
@@ -84,6 +85,7 @@ export default function DashboardPage() {
           </button>
         </header>
         <div className="space-y-8">
+            <PredictionPanel />
             <TransactionNetwork />
             <AlertQueue />
         </div>
