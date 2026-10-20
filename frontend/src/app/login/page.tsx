@@ -1,11 +1,16 @@
+
 "use client";
 
-import { FormEvent, useState } from "react";
+import type { FormEvent } from "react";
+import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabase";
 
 type AuthMode = "login" | "signup";
 
 export default function LoginPage() {
+  const router = useRouter();
+
   const [mode, setMode] = useState<AuthMode>("login");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -13,35 +18,94 @@ export default function LoginPage() {
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
 
-  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+  // Redirect users who already have an active Supabase session.
+  useEffect(() => {
+    let mounted = true;
+
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((event, session) => {
+      if (event === "SIGNED_IN" && session) {
+        router.replace("/dashboard");
+      }
+    });
+
+    async function checkExistingSession() {
+      const {
+        data: { session },
+        error: sessionError,
+      } = await supabase.auth.getSession();
+
+      if (!mounted || sessionError) return;
+
+      if (session) {
+        router.replace("/dashboard");
+      }
+    }
+
+    void checkExistingSession();
+
+    return () => {
+      mounted = false;
+      subscription.unsubscribe();
+    };
+  }, [router]);
+
+  async function handleSubmit(
+    event: FormEvent<HTMLFormElement>
+  ) {
     event.preventDefault();
+
+    if (loading) return;
+
     setLoading(true);
     setMessage("");
     setError("");
 
     try {
       if (mode === "login") {
-        const { error } = await supabase.auth.signInWithPassword({
-          email,
-          password,
-        });
+        const { data, error: authError } =
+          await supabase.auth.signInWithPassword({
+            email: email.trim(),
+            password,
+          });
 
-        if (error) throw error;
+        if (authError) {
+          throw authError;
+        }
+
+        if (!data.session) {
+          throw new Error(
+            "Sign-in did not return an active session. Please try again."
+          );
+        }
 
         setMessage("Successfully signed in to MuleWatch.");
-      } else {
-        const { data, error } = await supabase.auth.signUp({
-          email,
-          password,
-        });
 
-        if (error) throw error;
+        // Replace the login page with the dashboard.
+        router.replace("/dashboard");
+        router.refresh();
+      } else {
+        const { data, error: authError } =
+          await supabase.auth.signUp({
+            email: email.trim(),
+            password,
+          });
+
+        if (authError) {
+          throw authError;
+        }
 
         if (data.session) {
-          setMessage("Account created successfully. You are signed in.");
+          setMessage(
+            "Account created successfully. Redirecting to the dashboard..."
+          );
+
+          router.replace("/dashboard");
+          router.refresh();
         } else {
           setMessage(
-            "Account created. Check your email for the confirmation link."
+            "Account created. Check your email for the confirmation link. After confirming, return here to sign in."
           );
         }
       }
@@ -54,6 +118,12 @@ export default function LoginPage() {
     } finally {
       setLoading(false);
     }
+  }
+
+  function changeMode(nextMode: AuthMode) {
+    setMode(nextMode);
+    setMessage("");
+    setError("");
   }
 
   return (
@@ -69,7 +139,9 @@ export default function LoginPage() {
           </p>
 
           <h1 className="mt-4 text-3xl font-bold tracking-tight">
-            {mode === "login" ? "Welcome back" : "Create your account"}
+            {mode === "login"
+              ? "Welcome back"
+              : "Create your account"}
           </h1>
 
           <p className="mt-3 text-sm text-slate-400">
@@ -83,12 +155,9 @@ export default function LoginPage() {
           <div className="mb-6 grid grid-cols-2 rounded-lg bg-slate-950 p-1">
             <button
               type="button"
-              onClick={() => {
-                setMode("login");
-                setMessage("");
-                setError("");
-              }}
-              className={`rounded-md px-3 py-2.5 text-sm font-medium ${
+              onClick={() => changeMode("login")}
+              aria-pressed={mode === "login"}
+              className={`rounded-md px-3 py-2.5 text-sm font-medium transition ${
                 mode === "login"
                   ? "bg-slate-800 text-white"
                   : "text-slate-400 hover:text-white"
@@ -99,12 +168,9 @@ export default function LoginPage() {
 
             <button
               type="button"
-              onClick={() => {
-                setMode("signup");
-                setMessage("");
-                setError("");
-              }}
-              className={`rounded-md px-3 py-2.5 text-sm font-medium ${
+              onClick={() => changeMode("signup")}
+              aria-pressed={mode === "signup"}
+              className={`rounded-md px-3 py-2.5 text-sm font-medium transition ${
                 mode === "signup"
                   ? "bg-slate-800 text-white"
                   : "text-slate-400 hover:text-white"
@@ -114,7 +180,10 @@ export default function LoginPage() {
             </button>
           </div>
 
-          <form onSubmit={handleSubmit} className="space-y-5">
+          <form
+            onSubmit={handleSubmit}
+            className="space-y-5"
+          >
             <div>
               <label
                 htmlFor="email"
@@ -128,9 +197,13 @@ export default function LoginPage() {
                 name="email"
                 type="email"
                 autoComplete="email"
+                autoCapitalize="none"
+                spellCheck={false}
                 required
                 value={email}
-                onChange={(event) => setEmail(event.target.value)}
+                onChange={(event) =>
+                  setEmail(event.target.value)
+                }
                 placeholder="you@example.com"
                 className="w-full rounded-lg border border-slate-700 bg-slate-950 px-4 py-3 text-sm outline-none placeholder:text-slate-600 focus:border-emerald-400 focus:ring-2 focus:ring-emerald-400/20"
               />
@@ -149,15 +222,20 @@ export default function LoginPage() {
                 name="password"
                 type="password"
                 autoComplete={
-                  mode === "login" ? "current-password" : "new-password"
+                  mode === "login"
+                    ? "current-password"
+                    : "new-password"
                 }
                 required
                 minLength={6}
                 value={password}
-                onChange={(event) => setPassword(event.target.value)}
+                onChange={(event) =>
+                  setPassword(event.target.value)
+                }
                 placeholder="Enter your password"
                 className="w-full rounded-lg border border-slate-700 bg-slate-950 px-4 py-3 text-sm outline-none placeholder:text-slate-600 focus:border-emerald-400 focus:ring-2 focus:ring-emerald-400/20"
               />
+
               <p className="mt-2 text-xs text-slate-500">
                 Use at least 6 characters.
               </p>
