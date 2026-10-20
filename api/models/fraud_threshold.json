@@ -1,0 +1,4 @@
+{
+  "threshold": 0.40541772516971875,
+  "selection_method": "Maximum F1-score using out-of-fold probabilities from the training split"
+}
