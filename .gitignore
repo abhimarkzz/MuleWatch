@@ -1,36 +1,88 @@
+
 # ==========================================
 # SECRETS AND ENVIRONMENT VARIABLES
 # ==========================================
-.env
-.env.*
-!.env.example
-!.env.*.example
-.envrc
+**/.env
+**/.env.*
+**/.envrc
 
-# Credentials and secret files
-secrets/
-secret/
-credentials/
-**/secrets/**
-**/credentials/**
-.netrc
-.npmrc
-*.token
-*.pem
-*.key
-*.p12
-*.pfx
-*.keystore
+# Allow safe example files to be committed.
+!**/.env.example
+!**/.env.*.example
 
-# API keys and service-account credentials
-kaggle.json
+# ==========================================
+# CREDENTIALS AND PRIVATE KEYS
+# ==========================================
 **/kaggle.json
-credentials.json
 **/credentials.json
-service-account*.json
-**/service-account*.json
-*-credentials.json
+**/*service-account*.json
 **/*-credentials.json
+
+**/secrets/
+**/secret/
+**/credentials/
+
+**/.netrc
+**/*.pem
+**/*.key
+**/*.p12
+**/*.pfx
+**/*.keystore
+**/*.token
+
+# ==========================================
+# NODE.JS AND NEXT.JS
+# ==========================================
+**/node_modules/
+**/.next/
+**/out/
+**/dist/
+**/build/
+**/coverage/
+
+**/.vercel/
+**/.turbo/
+
+.pnp
+.pnp.*
+
+# Yarn cache and generated files.
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/versions
+
+# Package manager logs.
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# ==========================================
+# PYTHON AND FASTAPI
+# ==========================================
+**/__pycache__/
+*.py[cod]
+*$py.class
+
+**/.venv/
+**/venv/
+**/ENV/
+**/env/
+
+**/*.egg-info/
+**/.pytest_cache/
+**/.mypy_cache/
+**/.ruff_cache/
+**/.pyre/
+**/.tox/
+**/.nox/
+
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
 
 # ==========================================
 # DATASETS AND PRIVATE DATA
@@ -39,12 +91,13 @@ data/
 datasets/
 private_data/
 uploads/
+
 *.csv
 *.tsv
 *.parquet
 *.feather
 
-# Local databases and database backups
+# Local databases and backups.
 *.db
 *.sqlite
 *.sqlite3
@@ -52,49 +105,14 @@ uploads/
 *.bak
 
 # ==========================================
-# PYTHON
+# MODEL ARTIFACTS
 # ==========================================
-__pycache__/
-*.py[cod]
-*$py.class
+# IMPORTANT:
+# Keep the trained fraud model required by the Render API.
+# There is intentionally no blanket *.joblib ignore rule.
+!api/models/fraud_detection_rf.joblib
 
-.venv/
-venv/
-env/
-ENV/
-.python-env/
-
-build/
-dist/
-wheels/
-*.egg
-*.egg-info/
-pip-wheel-metadata/
-
-.pytest_cache/
-.mypy_cache/
-.pyre/
-.ruff_cache/
-.coverage
-.coverage.*
-htmlcov/
-coverage.xml
-
-# Python environment and tooling
-.tox/
-.nox/
-
-# ==========================================
-# NOTEBOOKS
-# ==========================================
-.ipynb_checkpoints/
-
-# ==========================================
-# MODEL TRAINING OUTPUTS
-# ==========================================
-# Keep api/models/fraud_detection_rf.joblib tracked
-# because Render needs the trained model.
-# Avoid committing other temporary training artifacts.
+# Other large model artifacts.
 *.onnx
 *.pt
 *.pth
@@ -115,23 +133,15 @@ temp/
 *.bak
 
 # ==========================================
-# NODE / FRONTEND
+# SUPABASE AND CLOUD TOOL STATE
 # ==========================================
-node_modules/
-npm-debug.log*
-yarn-debug.log*
-pnpm-debug.log*
-.next/
-.nuxt/
-.svelte-kit/
-dist/
-coverage/
+**/.supabase/.temp/
 
 # ==========================================
-# CLOUD AND LOCAL TOOL STATE
+# TYPESCRIPT AND NEXT.JS GENERATED FILES
 # ==========================================
-.vercel/
-.supabase/.temp/
+*.tsbuildinfo
+next-env.d.ts
 
 # ==========================================
 # EDITORS AND OPERATING SYSTEMS
@@ -141,12 +151,7 @@ coverage/
 .LSOverride
 Thumbs.db
 Desktop.ini
-.vscode/
-.idea/
-*.iml
 
-# Local environment overrides
-.env.local
-.env.development.local
-.env.test.local
-.env.production.local
+**/.vscode/
+**/.idea/
+*.iml

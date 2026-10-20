@@ -1,22 +1,27 @@
+
 # ==========================================
 # SECRETS AND ENVIRONMENT VARIABLES
 # ==========================================
 **/.env
 **/.env.*
-!.env.example
-!.env.*.example
-!**/.env.example
-!**/.env.*.example
 **/.envrc
 
-# Credentials and private keys
+# Allow safe example files to be committed.
+!**/.env.example
+!**/.env.*.example
+
+# ==========================================
+# CREDENTIALS AND PRIVATE KEYS
+# ==========================================
 **/kaggle.json
 **/credentials.json
 **/*service-account*.json
 **/*-credentials.json
+
 **/secrets/
 **/secret/
 **/credentials/
+
 **/.netrc
 **/*.pem
 **/*.key
@@ -35,18 +40,20 @@
 **/build/
 **/coverage/
 
+**/.vercel/
+**/.turbo/
+
 .pnp
 .pnp.*
+
+# Yarn cache and generated files.
 .yarn/*
 !.yarn/patches
 !.yarn/plugins
 !.yarn/releases
 !.yarn/versions
 
-**/.vercel/
-**/.turbo/
-
-# Package manager logs
+# Package manager logs.
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
@@ -84,12 +91,13 @@ data/
 datasets/
 private_data/
 uploads/
+
 *.csv
 *.tsv
 *.parquet
 *.feather
 
-# Local databases and backups
+# Local databases and backups.
 *.db
 *.sqlite
 *.sqlite3
@@ -97,13 +105,14 @@ uploads/
 *.bak
 
 # ==========================================
-# MODEL TRAINING TEMPORARY OUTPUTS
+# MODEL ARTIFACTS
 # ==========================================
-# Keep api/models/fraud_detection_rf.joblib tracked.
-# Render needs this trained model.
-# Do not add a blanket *.joblib ignore rule.
+# IMPORTANT:
+# Keep the trained fraud model required by the Render API.
+# There is intentionally no blanket *.joblib ignore rule.
+!api/models/fraud_detection_rf.joblib
 
-# Other large model artifacts
+# Other large model artifacts.
 *.onnx
 *.pt
 *.pth
@@ -129,7 +138,7 @@ temp/
 **/.supabase/.temp/
 
 # ==========================================
-# TYPESCRIPT
+# TYPESCRIPT AND NEXT.JS GENERATED FILES
 # ==========================================
 *.tsbuildinfo
 next-env.d.ts
