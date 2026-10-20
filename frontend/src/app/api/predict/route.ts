@@ -1,7 +1,8 @@
 import { NextResponse } from "next/server";
-import { supabaseAdmin } from "@/lib/supabase-admin";
 import { timingSafeEqual } from "node:crypto";
-import { createClient } from "@supabase/supabase-js";
+import { getSupabaseAdmin } from "@/lib/supabase-admin";
+import { authenticateRequest, bearerToken } from "@/lib/server/auth";
+import { MODEL_ALERT_REASON } from "@/lib/risk";
 
 export const maxDuration = 120;
 
@@ -89,39 +90,11 @@ async function isAuthorized(request: Request): Promise<boolean> {
     }
   }
 
-  // Allow users authenticated through Supabase to use the dashboard.
-  const authorization = request.headers.get("authorization");
-  const token = authorization
-    ?.match(/^Bearer\s+(.+)$/i)?.[1]
-    ?.trim();
+  // Signed-in analysts calling from the dashboard.
+  if (!bearerToken(request)) return false;
 
-  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const publicKey =
-    process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY ??
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-
-  if (!token || !supabaseUrl || !publicKey) {
-    return false;
-  }
-
-  try {
-    const authClient = createClient(supabaseUrl, publicKey, {
-      auth: {
-        persistSession: false,
-        autoRefreshToken: false,
-      },
-    });
-
-    const {
-      data: { user },
-      error,
-    } = await authClient.auth.getUser(token);
-
-    return !error && Boolean(user);
-  } catch (error) {
-    console.error("Supabase token verification failed:", error);
-    return false;
-  }
+  const auth = await authenticateRequest(request);
+  return auth.ok;
 }
 
 export async function POST(request: Request) {
@@ -357,10 +330,18 @@ export async function POST(request: Request) {
     const predictedIsFraud = prediction.predicted_is_fraud;
     const fraudProbability = prediction.fraud_probability;
 
+    const decisionThreshold =
+      typeof prediction.decision_threshold === "number" &&
+      Number.isFinite(prediction.decision_threshold)
+        ? prediction.decision_threshold
+        : null;
+
     const modelVersion =
       typeof prediction.model_version === "string"
         ? prediction.model_version
         : "unknown";
+
+    const supabaseAdmin = getSupabaseAdmin();
 
     // 9. Resolve optional source and destination accounts.
     async function upsertAccount(
@@ -438,8 +419,7 @@ export async function POST(request: Request) {
     let alertCreated = false;
 
     if (predictedIsFraud) {
-      const alertReason =
-        "Random Forest flagged this transaction for review.";
+      const alertReason = MODEL_ALERT_REASON;
 
       // Prevent ordinary retries from creating duplicate alerts.
       // A unique database constraint is needed to guarantee this
@@ -474,9 +454,11 @@ export async function POST(request: Request) {
             reason: alertReason,
           });
 
-        if (alertError) throw alertError;
+        // 23505: a concurrent retry inserted the same alert first (enforced by
+        // the alerts_transaction_reason_key unique index once applied).
+        if (alertError && alertError.code !== "23505") throw alertError;
 
-        alertCreated = true;
+        alertCreated = !alertError;
       }
     }
 
@@ -489,6 +471,7 @@ export async function POST(request: Request) {
         predicted_is_fraud: predictedIsFraud,
         fraud_probability: fraudProbability,
         model_version: modelVersion,
+        decision_threshold: decisionThreshold,
         saved_to_supabase: true,
         alert_created: alertCreated,
       },

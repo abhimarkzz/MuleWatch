@@ -155,3 +155,9 @@ Desktop.ini
 **/.vscode/
 **/.idea/
 *.iml
+
+# ==========================================
+# MULEWATCH ROOT
+# ==========================================
+# Duplicate of .env with credentials (no leading dot, so **/.env misses it).
+/env

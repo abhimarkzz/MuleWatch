@@ -1,26 +1,108 @@
 @import "tailwindcss";
 
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
-}
+/*
+ * MuleWatch design tokens.
+ *
+ * A light, paper-toned workspace: analysts read dense tables for long
+ * stretches, and the network canvas stays legible without glow effects.
+ * Colour roles are deliberately disjoint:
+ *   accent  – actions and selection only, never risk
+ *   risk-*  – model-derived severity
+ *   truth   – synthetic PaySim ground-truth labels (violet, so a dataset
+ *             label is never mistaken for a model score)
+ * Every coloured state is also written out as text.
+ */
+@theme {
+  --font-sans: var(--font-plex-sans), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-plex-mono), ui-monospace, "SFMono-Regular", monospace;
 
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
-}
+  --color-canvas: #f5f5f1;
+  --color-surface: #ffffff;
+  --color-sunken: #efeee9;
+  --color-line: #dedcd4;
+  --color-line-strong: #c4c2b8;
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+  --color-ink: #1b1e21;
+  --color-ink-2: #474c52;
+  --color-ink-3: #636970;
+
+  --color-accent: #1d4f7c;
+  --color-accent-hover: #163d60;
+  --color-accent-soft: #e6eef6;
+  --color-focus: #2563eb;
+
+  --color-risk-critical: #9f1c1c;
+  --color-risk-critical-soft: #fbeaea;
+  --color-risk-high: #a63d0c;
+  --color-risk-high-soft: #fcefe6;
+  --color-risk-medium: #805300;
+  --color-risk-medium-soft: #faf1d9;
+  --color-risk-low: #3c5c47;
+  --color-risk-low-soft: #eaf2ec;
+
+  --color-truth: #6236b0;
+  --color-truth-soft: #f0eafb;
+
+  --color-ok: #2f6b45;
+  --color-ok-soft: #e7f2ea;
+  --color-warn: #805300;
+  --color-warn-soft: #faf1d9;
+  --color-danger: #a11d1d;
+  --color-danger-soft: #fbeaea;
+
+  --text-2xs: 0.6875rem;
+  --text-2xs--line-height: 1rem;
+
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+
+  --shadow-overlay: 0 12px 32px -8px rgb(27 30 33 / 0.22), 0 2px 6px rgb(27 30 33 / 0.08);
+
+  --animate-shimmer: shimmer 1.4s ease-in-out infinite;
+
+  @keyframes shimmer {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.5; }
   }
 }
 
-body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+@layer base {
+  html {
+    color-scheme: light;
+    -webkit-text-size-adjust: 100%;
+  }
+
+  body {
+    background: var(--color-canvas);
+    color: var(--color-ink);
+    font-family: var(--font-sans);
+    font-size: 0.875rem;
+    line-height: 1.5;
+    font-feature-settings: "tnum" 1;
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
+  }
+
+  ::selection {
+    background: var(--color-accent-soft);
+  }
+
+  dialog::backdrop {
+    background: rgb(27 30 33 / 0.32);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }

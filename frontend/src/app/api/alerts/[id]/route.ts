@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
-import { supabaseAdmin } from "@/lib/supabase-admin";
+import { getSupabaseAdmin } from "@/lib/supabase-admin";
+import { authenticateRequest } from "@/lib/server/auth";
 
 const ALLOWED_STATUSES = [
   "open",
@@ -19,62 +19,10 @@ export async function PATCH(
   context: RouteContext
 ) {
   try {
-    // 1. Require a Supabase access token.
-    const authorization = request.headers.get("authorization");
-    const token = authorization?.match(/^Bearer\s+(.+)$/i)?.[1];
+    const auth = await authenticateRequest(request);
+    if (!auth.ok) return auth.response;
 
-    if (!token) {
-      return NextResponse.json(
-        { error: "Authentication required. Please sign in." },
-        { status: 401 }
-      );
-    }
-
-    // 2. Validate the Supabase configuration.
-    const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-    const supabaseKey =
-      process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY;
-
-    if (!supabaseUrl || !supabaseKey) {
-      console.error(
-        "Supabase authentication environment variables are missing."
-      );
-
-      return NextResponse.json(
-        { error: "Authentication service is not configured." },
-        { status: 500 }
-      );
-    }
-
-    // 3. Verify that the access token belongs to a valid user.
-    const supabaseAuth = createClient(
-      supabaseUrl,
-      supabaseKey,
-      {
-        auth: {
-          autoRefreshToken: false,
-          persistSession: false,
-          detectSessionInUrl: false,
-        },
-      }
-    );
-
-    const {
-      data: authData,
-      error: authError,
-    } = await supabaseAuth.auth.getUser(token);
-
-    if (authError || !authData.user) {
-      return NextResponse.json(
-        {
-          error:
-            "Your session is invalid or expired. Please sign in again.",
-        },
-        { status: 401 }
-      );
-    }
-
-    // 4. Validate the alert ID.
+    // Validate the alert ID.
     const { id } = await context.params;
 
     const uuidPattern =
@@ -87,7 +35,7 @@ export async function PATCH(
       );
     }
 
-    // 5. Parse the request body.
+    // Parse the request body.
     let body: unknown;
 
     try {
@@ -113,7 +61,7 @@ export async function PATCH(
 
     const requestedStatus = body.status;
 
-    // 6. Only permit explicitly supported status values.
+    // Only permit explicitly supported status values.
     if (
       typeof requestedStatus !== "string" ||
       !ALLOWED_STATUSES.includes(
@@ -129,9 +77,9 @@ export async function PATCH(
       );
     }
 
-    // 7. Update only the requested alert.
+    // Update only the requested alert.
     const { data: updatedAlert, error: updateError } =
-      await supabaseAdmin
+      await getSupabaseAdmin()
         .from("alerts")
         .update({ status: requestedStatus as AlertStatus })
         .eq("id", id)
@@ -160,7 +108,7 @@ export async function PATCH(
       );
     }
 
-    // 8. Return the confirmed database update.
+    // Return the confirmed database update.
     return NextResponse.json(
       {
         message: "Alert status updated successfully.",

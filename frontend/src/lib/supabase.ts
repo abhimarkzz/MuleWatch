@@ -1,16 +1,31 @@
-import { createClient } from "@supabase/supabase-js";
+import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 
-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-const supabasePublishableKey =
-  process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY;
+let browserClient: SupabaseClient | null = null;
 
-if (!supabaseUrl || !supabasePublishableKey) {
-  throw new Error(
-    "Missing Supabase URL or publishable key. Check frontend/.env.local."
-  );
+export class SupabaseConfigError extends Error {
+  constructor() {
+    super(
+      "Supabase is not configured. Set NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY in frontend/.env.local."
+    );
+    this.name = "SupabaseConfigError";
+  }
 }
 
-export const supabase = createClient(
-  supabaseUrl,
-  supabasePublishableKey
-);
+/**
+ * Browser client using the publishable key only. Created on first use so a
+ * missing variable surfaces as an on-screen configuration error rather than
+ * crashing module evaluation during prerendering.
+ */
+export function getSupabase(): SupabaseClient {
+  if (browserClient) return browserClient;
+
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const key =
+    process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY ??
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+
+  if (!url || !key) throw new SupabaseConfigError();
+
+  browserClient = createClient(url, key);
+  return browserClient;
+}

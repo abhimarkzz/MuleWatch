@@ -4,8 +4,8 @@ import {
   NextResponse,
   connection,
 } from "next/server";
-import { createClient } from "@supabase/supabase-js";
-import { supabaseAdmin } from "@/lib/supabase-admin";
+import { getSupabaseAdmin } from "@/lib/supabase-admin";
+import { authenticateRequest } from "@/lib/server/auth";
 
 const UUID_REGEX =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -38,51 +38,8 @@ export async function GET(
       );
     }
 
-    const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-
-    const publicKey =
-      process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY ??
-      process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-
-    if (!supabaseUrl || !publicKey) {
-      return NextResponse.json(
-        { error: "Supabase environment variables are missing." },
-        { status: 500 }
-      );
-    }
-
-    // Require a valid signed-in Supabase user.
-    const authorization = request.headers.get("authorization");
-
-    const token = authorization?.startsWith("Bearer ")
-      ? authorization.slice("Bearer ".length).trim()
-      : "";
-
-    if (!token) {
-      return NextResponse.json(
-        { error: "Authentication required." },
-        { status: 401 }
-      );
-    }
-
-    const authClient = createClient(supabaseUrl, publicKey, {
-      auth: {
-        persistSession: false,
-        autoRefreshToken: false,
-      },
-    });
-
-    const {
-      data: { user },
-      error: authError,
-    } = await authClient.auth.getUser(token);
-
-    if (authError || !user) {
-      return NextResponse.json(
-        { error: "Your session is invalid or expired." },
-        { status: 401 }
-      );
-    }
+    const auth = await authenticateRequest(request);
+    if (!auth.ok) return auth.response;
 
     // Read and validate pagination parameters.
     const requestedLimit = Number(
@@ -104,7 +61,7 @@ export async function GET(
         : 0;
 
     // Fetch transactions where this account is the sender or recipient.
-    const { data, error } = await supabaseAdmin
+    const { data, error } = await getSupabaseAdmin()
       .from("transactions")
       .select(
         [

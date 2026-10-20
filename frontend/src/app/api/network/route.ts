@@ -3,8 +3,8 @@ import {
   NextResponse,
   connection,
 } from "next/server";
-import { createClient } from "@supabase/supabase-js";
-import { supabaseAdmin } from "@/lib/supabase-admin";
+import { getSupabaseAdmin } from "@/lib/supabase-admin";
+import { authenticateRequest } from "@/lib/server/auth";
 
 type NetworkRow = {
   transaction_id: string;
@@ -70,54 +70,11 @@ export async function GET(request: NextRequest) {
   await connection();
 
   try {
-    const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-
-    const publicKey =
-      process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY ??
-      process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-
-    if (!supabaseUrl || !publicKey) {
-      return NextResponse.json(
-        { error: "Supabase public environment variables are missing." },
-        { status: 500 }
-      );
-    }
-
-    // Authenticate the dashboard user before reading graph data.
-    const authorization = request.headers.get("authorization");
-
-    const token = authorization?.startsWith("Bearer ")
-      ? authorization.slice("Bearer ".length).trim()
-      : "";
-
-    if (!token) {
-      return NextResponse.json(
-        { error: "Authentication required." },
-        { status: 401 }
-      );
-    }
-
-    const authClient = createClient(supabaseUrl, publicKey, {
-      auth: {
-        persistSession: false,
-        autoRefreshToken: false,
-      },
-    });
-
-    const {
-      data: { user },
-      error: authError,
-    } = await authClient.auth.getUser(token);
-
-    if (authError || !user) {
-      return NextResponse.json(
-        { error: "Your session is invalid or expired." },
-        { status: 401 }
-      );
-    }
+    const auth = await authenticateRequest(request);
+    if (!auth.ok) return auth.response;
 
     // Execute the recursive PostgreSQL CTE through Supabase RPC.
-    const { data, error } = await supabaseAdmin.rpc(
+    const { data, error } = await getSupabaseAdmin().rpc(
       "get_mulewatch_two_hop_transactions",
       { edge_limit: 100 }
     );

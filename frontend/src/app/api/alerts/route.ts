@@ -1,10 +1,51 @@
 import { connection, NextRequest, NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
-import { supabaseAdmin } from "@/lib/supabase-admin";
+import { getSupabaseAdmin } from "@/lib/supabase-admin";
+import { authenticateRequest } from "@/lib/server/auth";
+import { createTimer } from "@/lib/server/timing";
+import { PAGE_SIZE, parseFilters } from "@/lib/alert-filters";
+import { MODEL_ALERT_REASON, PAYSIM_ALERT_REASON_PREFIX } from "@/lib/risk";
+
+const NO_STORE = { "Cache-Control": "no-store" };
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// PostgREST `or` filters for each alert source. The values are constants, so
+// building the filter string here cannot be influenced by request input.
+const MODEL_REASON = `reason.eq."${MODEL_ALERT_REASON}"`;
+const PAYSIM_REASON = `reason.like."${PAYSIM_ALERT_REASON_PREFIX}*"`;
+
+const ALERT_COLUMNS = "id, transaction_id, severity, status, risk_score, reason, created_at";
+
+const TRANSACTION_COLUMNS = [
+  "id",
+  "external_transaction_id",
+  "source_account_id",
+  "destination_account_id",
+  "transaction_type",
+  "amount",
+  "transaction_step",
+  "predicted_is_fraud",
+  "model_score",
+  "model_version",
+  "metadata",
+  "created_at",
+].join(", ");
+
+type AlertRow = {
+  id: string;
+  transaction_id: string;
+  severity: string | null;
+  status: string | null;
+  risk_score: number | string | null;
+  reason: string | null;
+  created_at: string;
+};
 
 type AlertTransactionRow = {
   id: string;
   external_transaction_id: string | null;
+  source_account_id: string | null;
+  destination_account_id: string | null;
   transaction_type: string | null;
   amount: number | string | null;
   transaction_step: number | null;
@@ -15,174 +56,151 @@ type AlertTransactionRow = {
   created_at: string | null;
 };
 
+/**
+ * Escapes LIKE wildcards so user input is matched literally. PostgREST also
+ * accepts `*` as an alias for `%`, so it is escaped too.
+ */
+function likeLiteral(value: string): string {
+  return value.replace(/[\\%_*]/g, (character) => `\\${character}`);
+}
+
+function serverError(message: string) {
+  return NextResponse.json({ error: message }, { status: 500, headers: NO_STORE });
+}
+
 export async function GET(request: NextRequest) {
   await connection();
+
+  const timer = createTimer();
+
   try {
-    // 1. Authenticate the request using the Supabase access token.
-    const authorization = request.headers.get("authorization");
-    const token = authorization?.match(/^Bearer\s+(.+)$/i)?.[1];
+    const auth = await timer.measure("auth", () => authenticateRequest(request));
+    if (!auth.ok) return auth.response;
 
-    if (!token) {
-      return NextResponse.json(
-        { error: "Authentication required. Please sign in." },
-        { status: 401 }
-      );
-    }
+    const supabaseAdmin = getSupabaseAdmin();
+    const filters = parseFilters(request.nextUrl.searchParams);
+    // The open/investigating summary is unfiltered and only changes when a
+    // status changes, so clients skip it while paging (`summary=0`).
+    const includeSummary = request.nextUrl.searchParams.get("summary") !== "0";
+    const uuidSearch = filters.q !== "" && UUID.test(filters.q);
+    const textSearch = filters.q !== "" && !uuidSearch;
 
-    const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-    const supabaseKey =
-      process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY;
-
-    if (!supabaseUrl || !supabaseKey) {
-      console.error(
-        "Supabase authentication environment variables are missing."
-      );
-
-      return NextResponse.json(
-        { error: "Authentication service is not configured." },
-        { status: 500 }
-      );
-    }
-
-    const supabaseAuth = createClient(supabaseUrl, supabaseKey, {
-      auth: {
-        autoRefreshToken: false,
-        persistSession: false,
-        detectSessionInUrl: false,
-      },
-    });
-
-    const {
-      data: authData,
-      error: authError,
-    } = await supabaseAuth.auth.getUser(token);
-
-    if (authError || !authData.user) {
-      return NextResponse.json(
-        {
-          error:
-            "Your session is invalid or expired. Please sign in again.",
-        },
-        { status: 401 }
-      );
-    }
-
-    // 2. Retrieve unresolved alerts, newest first.
-    const { data: alerts, error: alertsError } =
-      await supabaseAdmin
+    // A UUID may be an alert ID or a transaction ID. Resolve an alert ID to
+    // its transaction so one `in` filter covers both.
+    let searchTransactionIds: string[] | null = null;
+    if (uuidSearch) {
+      const { data: byAlert, error: lookupError } = await supabaseAdmin
         .from("alerts")
-        .select(
-          "id, transaction_id, severity, status, risk_score, reason, created_at"
-        )
-        .neq("status", "resolved")
-        .order("created_at", { ascending: false })
-        .limit(100);
+        .select("transaction_id")
+        .eq("id", filters.q)
+        .limit(1);
 
-    if (alertsError) {
-      console.error("Alert query failed:", alertsError.message);
+      if (lookupError) {
+        console.error("Alert ID lookup failed:", lookupError.message);
+        return serverError("Could not search alerts.");
+      }
 
-      return NextResponse.json(
-        { error: "Could not load alerts from the database." },
-        { status: 500 }
-      );
+      searchTransactionIds = [filters.q, ...(byAlert ?? []).map((row) => row.transaction_id as string)];
     }
 
-    if (!alerts || alerts.length === 0) {
-      return NextResponse.json(
-        { alerts: [] },
-        { headers: { "Cache-Control": "no-store" } }
+    // The transaction is embedded through the alerts.transaction_id foreign
+    // key, so a page is one request. A text search turns the embed into an
+    // inner join filtered on the transaction reference.
+    const embed = `transaction:transactions${textSearch ? "!inner" : ""}(${TRANSACTION_COLUMNS})`;
+
+    // A fresh builder per call: PostgREST builders are single-use.
+    const buildQuery = () => {
+      let query = supabaseAdmin
+        .from("alerts")
+        .select(`${ALERT_COLUMNS}, ${embed}`, { count: "exact" })
+        .neq("status", "resolved");
+
+      if (filters.status !== "all") query = query.eq("status", filters.status);
+      if (filters.severity !== "all") query = query.eq("severity", filters.severity);
+
+      query = query.or(
+        filters.source === "model_prediction"
+          ? MODEL_REASON
+          : filters.source === "ground_truth_demo"
+            ? PAYSIM_REASON
+            : `${MODEL_REASON},${PAYSIM_REASON}`
       );
+
+      if (searchTransactionIds) query = query.in("transaction_id", searchTransactionIds);
+      if (textSearch) {
+        query = query.ilike("transaction.external_transaction_id", `%${likeLiteral(filters.q)}%`);
+      }
+
+      query =
+        filters.sort === "risk"
+          ? query
+              .order("risk_score", { ascending: false, nullsFirst: false })
+              .order("created_at", { ascending: false })
+          : query.order("created_at", { ascending: filters.sort === "oldest" });
+
+      // Tie-breaker keeps page boundaries stable when timestamps collide.
+      return query.order("id", { ascending: true });
+    };
+
+    const fetchPage = (page: number) => buildQuery().range((page - 1) * PAGE_SIZE, page * PAGE_SIZE - 1);
+
+    const [firstPage, openResult, investigatingResult] = await Promise.all([
+      timer.measure("page", () => fetchPage(filters.page)),
+      includeSummary
+        ? timer.measure("count_open", () =>
+            supabaseAdmin.from("alerts").select("id", { count: "exact", head: true }).eq("status", "open")
+          )
+        : null,
+      includeSummary
+        ? timer.measure("count_investigating", () =>
+            supabaseAdmin.from("alerts").select("id", { count: "exact", head: true }).eq("status", "investigating")
+          )
+        : null,
+    ]);
+
+    // PostgREST rejects a range past the last matching row (for example after
+    // alerts were resolved elsewhere). Serve the last page of the same filtered
+    // result instead of an error.
+    let page = filters.page;
+    let pageResult = firstPage;
+    if (pageResult.error?.code === "PGRST103") {
+      const { count, error: countError } = await buildQuery().limit(1);
+      if (countError) {
+        console.error("Alert count failed:", countError.message);
+        return serverError("Could not load alerts from the database.");
+      }
+      page = Math.max(1, Math.ceil((count ?? 0) / PAGE_SIZE));
+      pageResult = await fetchPage(page);
     }
 
-    // 3. Collect unique transaction IDs associated with alerts.
-    const transactionIds = [
-      ...new Set(
-        alerts
-          .map((alert) => alert.transaction_id)
-          .filter((id): id is string => Boolean(id))
-      ),
-    ];
-
-    if (transactionIds.length === 0) {
-      return NextResponse.json(
-        { alerts: [] },
-        { headers: { "Cache-Control": "no-store" } }
-      );
-    }
-
-    // 4. Retrieve the associated transaction records.
-    const { data: transactions, error: transactionsError } =
-      await supabaseAdmin
-        .from("transactions")
-        .select(
-          [
-            "id",
-            "external_transaction_id",
-            "transaction_type",
-            "amount",
-            "transaction_step",
-            "predicted_is_fraud",
-            "model_score",
-            "model_version",
-            "metadata",
-            "created_at",
-          ].join(", ")
-        )
-        .in("id", transactionIds);
-
-    if (transactionsError) {
+    if (pageResult.error || openResult?.error || investigatingResult?.error) {
       console.error(
-        "Transaction query failed:",
-        transactionsError.message
+        "Alert query failed:",
+        pageResult.error?.message ?? openResult?.error?.message ?? investigatingResult?.error?.message
       );
-
-      return NextResponse.json(
-        {
-          error: "Could not load the associated transactions.",
-        },
-        { status: 500 }
-      );
+      return serverError("Could not load alerts from the database.");
     }
 
-    // 5. Type the transaction records explicitly.
-    // The cast handles Supabase-generated JSON/database types.
-    const transactionRows = (
-      transactions ?? []
-    ) as unknown as AlertTransactionRow[];
+    const total = pageResult.count ?? 0;
+    const alerts = (pageResult.data ?? []) as unknown as Array<AlertRow & { transaction: AlertTransactionRow | null }>;
 
-    // 6. Index transactions by their database IDs.
-    const transactionMap = new Map<string, AlertTransactionRow>(
-      transactionRows.map(
-        (transaction) =>
-          [transaction.id, transaction] as const
-      )
-    );
-
-    // 7. Classify alerts without confusing demonstrations
-    // with predictions produced by the fraud model.
+    // The reason filter selects candidates; the linked transaction confirms
+    // them. A model alert needs a stored positive prediction and a PaySim
+    // alert needs the isFraud label, otherwise it is reported as unverified.
+    let unverified = 0;
     const queue = alerts.flatMap((alert) => {
-      const transaction =
-        transactionMap.get(alert.transaction_id) ?? null;
-
-      // A genuine model-generated alert must have a positive
-      // prediction recorded on its associated transaction.
-      const isModelPrediction =
-        transaction?.predicted_is_fraud === true;
-
+      const transaction = alert.transaction ?? null;
       const metadata = transaction?.metadata;
 
-      // PaySim demonstration alerts are accepted only when both
-      // the dataset label and the alert reason identify the demo.
+      const isModelPrediction = alert.reason === MODEL_ALERT_REASON && transaction?.predicted_is_fraud === true;
       const isPaySimDemo =
-        metadata?.dataset === "PaySim" &&
-        String(metadata?.ground_truth_is_fraud ?? "") === "1" &&
         typeof alert.reason === "string" &&
-        alert.reason.startsWith(
-          "Demonstration alert from PaySim ground-truth label"
-        );
+        alert.reason.startsWith(PAYSIM_ALERT_REASON_PREFIX) &&
+        metadata?.dataset === "PaySim" &&
+        String(metadata?.ground_truth_is_fraud ?? "") === "1";
 
-      // Ignore alerts that cannot be verified as either source.
       if (!isModelPrediction && !isPaySimDemo) {
+        unverified += 1;
         return [];
       }
 
@@ -190,27 +208,28 @@ export async function GET(request: NextRequest) {
         {
           ...alert,
           transaction,
-          alert_source: isModelPrediction
-            ? ("model_prediction" as const)
-            : ("ground_truth_demo" as const),
+          alert_source: isModelPrediction ? ("model_prediction" as const) : ("ground_truth_demo" as const),
         },
       ];
     });
 
-    // 8. Return uncached results to the authenticated client.
     return NextResponse.json(
-      { alerts: queue },
-      { headers: { "Cache-Control": "no-store" } }
+      {
+        alerts: queue,
+        page,
+        pageSize: PAGE_SIZE,
+        total,
+        pageCount: Math.max(1, Math.ceil(total / PAGE_SIZE)),
+        summary:
+          openResult && investigatingResult
+            ? { open: openResult.count ?? 0, investigating: investigatingResult.count ?? 0 }
+            : undefined,
+        unverified,
+      },
+      { headers: { ...NO_STORE, "Server-Timing": timer.header() } }
     );
   } catch (error) {
     console.error("Unexpected alert API error:", error);
-
-    return NextResponse.json(
-      {
-        error:
-          "An unexpected error occurred while loading alerts.",
-      },
-      { status: 500 }
-    );
+    return serverError("An unexpected error occurred while loading alerts.");
   }
 }
