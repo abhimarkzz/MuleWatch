@@ -1,4 +1,4 @@
-import { NextRequest, NextResponse } from "next/server";
+import { connection, NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { supabaseAdmin } from "@/lib/supabase-admin";
 
@@ -16,6 +16,7 @@ type AlertTransactionRow = {
 };
 
 export async function GET(request: NextRequest) {
+  await connection();
   try {
     // 1. Authenticate the request using the Supabase access token.
     const authorization = request.headers.get("authorization");

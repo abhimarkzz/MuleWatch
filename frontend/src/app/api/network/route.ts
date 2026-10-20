@@ -1,4 +1,8 @@
-import { NextRequest, NextResponse } from "next/server";
+import {
+  NextRequest,
+  NextResponse,
+  connection,
+} from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { supabaseAdmin } from "@/lib/supabase-admin";
 
@@ -63,6 +67,8 @@ function toFiniteNumber(
 }
 
 export async function GET(request: NextRequest) {
+  await connection();
+
   try {
     const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
 

@@ -3,14 +3,11 @@
 
 import type { FormEvent } from "react";
 import { useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabase";
 
 type AuthMode = "login" | "signup";
 
 export default function LoginPage() {
-  const router = useRouter();
-
   const [mode, setMode] = useState<AuthMode>("login");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -18,28 +15,24 @@ export default function LoginPage() {
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
 
-  // Redirect users who already have an active Supabase session.
+  // Redirect users who already have a valid Supabase session.
   useEffect(() => {
     let mounted = true;
 
-    const {
-      data: { subscription },
-    } = supabase.auth.onAuthStateChange((event, session) => {
-      if (event === "SIGNED_IN" && session) {
-        router.replace("/dashboard");
-      }
-    });
-
     async function checkExistingSession() {
-      const {
-        data: { session },
-        error: sessionError,
-      } = await supabase.auth.getSession();
+      try {
+        const {
+          data: { session },
+          error: sessionError,
+        } = await supabase.auth.getSession();
 
-      if (!mounted || sessionError) return;
+        if (!mounted || sessionError) return;
 
-      if (session) {
-        router.replace("/dashboard");
+        if (session) {
+          window.location.replace("/dashboard");
+        }
+      } catch {
+        // Leave the login page accessible if session checking fails.
       }
     }
 
@@ -47,9 +40,8 @@ export default function LoginPage() {
 
     return () => {
       mounted = false;
-      subscription.unsubscribe();
     };
-  }, [router]);
+  }, []);
 
   async function handleSubmit(
     event: FormEvent<HTMLFormElement>
@@ -80,35 +72,31 @@ export default function LoginPage() {
           );
         }
 
-        setMessage("Successfully signed in to MuleWatch.");
-
-        // Replace the login page with the dashboard.
-        router.replace("/dashboard");
-        router.refresh();
-      } else {
-        const { data, error: authError } =
-          await supabase.auth.signUp({
-            email: email.trim(),
-            password,
-          });
-
-        if (authError) {
-          throw authError;
-        }
-
-        if (data.session) {
-          setMessage(
-            "Account created successfully. Redirecting to the dashboard..."
-          );
-
-          router.replace("/dashboard");
-          router.refresh();
-        } else {
-          setMessage(
-            "Account created. Check your email for the confirmation link. After confirming, return here to sign in."
-          );
-        }
+        // Navigate directly to the dashboard after successful sign-in.
+        window.location.replace("/dashboard");
+        return;
       }
+
+      const { data, error: authError } =
+        await supabase.auth.signUp({
+          email: email.trim(),
+          password,
+        });
+
+      if (authError) {
+        throw authError;
+      }
+
+      if (data.session) {
+        // Supabase created the account and signed the user in.
+        window.location.replace("/dashboard");
+        return;
+      }
+
+      // Email confirmation may be required before the first sign-in.
+      setMessage(
+        "Account created. Check your email for the confirmation link. After confirming, return here to sign in."
+      );
     } catch (err) {
       setError(
         err instanceof Error
@@ -180,10 +168,7 @@ export default function LoginPage() {
             </button>
           </div>
 
-          <form
-            onSubmit={handleSubmit}
-            className="space-y-5"
-          >
+          <form onSubmit={handleSubmit} className="space-y-5">
             <div>
               <label
                 htmlFor="email"
