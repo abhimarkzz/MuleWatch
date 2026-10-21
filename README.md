@@ -12,12 +12,12 @@ graph, and score new transactions with a Random Forest model.
 
 ```mermaid
 flowchart LR
-  B[Browser<br/>Next.js client] -- "Supabase Auth<br/>(publishable key)" --> SA[(Supabase Auth)]
-  B -- "Bearer access token" --> R[Next.js route handlers<br/>/api/*]
-  R -- "verify token<br/>+ optional allowlist" --> SA
-  R -- "service-role key<br/>(server only)" --> DB[(Supabase Postgres<br/>accounts · transactions · alerts)]
-  R -- "RPC: recursive CTE" --> DB
-  R -- "POST /predict" --> M[FastAPI on Render<br/>scikit-learn Random Forest]
+  B["Browser: Next.js client"] -->|"sign in (publishable key)"| SA[("Supabase Auth")]
+  SA -.->|"public signing keys (JWKS, cached)"| R
+  B -->|"Bearer access token"| R["Next.js route handlers: /api/*"]
+  R -->|"service-role key, server only"| DB[("Supabase Postgres: accounts, transactions, alerts")]
+  R -->|"RPC: recursive CTE"| DB
+  R -->|"POST /predict"| M["FastAPI on Render: scikit-learn Random Forest"]
 ```
 
 | Part | Location | Role |
@@ -174,7 +174,9 @@ python3 -m pytest api/tests -q
 
 ## Database migrations
 
-`supabase/migrations/` holds the project's SQL migrations (applied manually in the Supabase SQL Editor; `20261021000000_alert_queue_indexes.sql` was applied 2026-10-21):
+`supabase/migrations/` holds the project's SQL migrations (applied manually in the Supabase SQL Editor; `20261021000000_alert_queue_indexes.sql` was applied 2026-10-21;
+`20261022000000_transaction_idempotency_guard.sql` was run 2026-10-22 and was a
+no-op because `transactions_external_transaction_id_key` already existed):
 indexes for the alert queue and a unique index that makes alert creation
 race-free. `/api/predict` already treats the resulting duplicate-key error as
 "alert already exists".
@@ -187,9 +189,9 @@ measurements.
 
 ## Known limitations
 
-- Alert paging uses offsets (25 per page) with an exact count. That is fine at
-  this scale; a very large queue would want keyset pagination and an index on
-  `alerts(status, risk_score desc, created_at desc)`.
+- Alert paging uses offsets (25 per page) with an exact count, backed by the
+  indexes in `supabase/migrations/`. A very large queue would want keyset
+  pagination instead.
 - Network expansion is bounded but the initial graph is whatever the RPC
   returns (up to 100 transactions); there is no "start from this account" query.
 - Status changes are not audited (no `changed_by` / history table) and
