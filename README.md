@@ -87,6 +87,12 @@ timeout and at most 400 output tokens; gpt-oss models are sent `reasoning_effort
 server-computed fan-out and layering counts. Rate limits return 429, timeouts 504,
 and other provider errors 502. Groq is never called automatically.
 
+### Live fraud notifications
+Signed-in analysts get a red slide-in notice when a new transaction is flagged
+by the model (Supabase Realtime `INSERT` on `public.transactions`). It needs the
+table in the `supabase_realtime` publication and an existing authenticated
+`SELECT` policy; see [`docs/REALTIME.md`](docs/REALTIME.md).
+
 ### Network
 `/api/network` calls the Postgres function
 `get_mulewatch_two_hop_transactions(edge_limit => 100)` (a recursive CTE that

@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { usePathname, useSearchParams } from "next/navigation";
+import { FRAUD_INSERT_EVENT } from "@/lib/realtime-fraud";
 import { apiRequest, errorMessage, isAbort, ApiError } from "@/lib/api-client";
 import { formatAmount, formatProbability, formatTimestamp, shortId } from "@/lib/format";
 import { asSeverity, asStatus, SEVERITY_LABEL, SEVERITY_ORDER } from "@/lib/risk";
@@ -106,6 +107,21 @@ export function AlertQueue() {
   }, [queryKey, reloadToken]);
 
   const reload = useCallback(() => setReloadToken((token) => token + 1), []);
+
+  // A flagged insert arrives before /api/predict writes its alert, so wait a
+  // moment, then refetch the current page in place.
+  useEffect(() => {
+    let timer: number | undefined;
+    const onFraud = () => {
+      window.clearTimeout(timer);
+      timer = window.setTimeout(reload, 2000);
+    };
+    window.addEventListener(FRAUD_INSERT_EVENT, onFraud);
+    return () => {
+      window.clearTimeout(timer);
+      window.removeEventListener(FRAUD_INSERT_EVENT, onFraud);
+    };
+  }, [reload]);
 
   useEffect(() => {
     if (!toast) return;

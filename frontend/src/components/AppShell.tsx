@@ -5,6 +5,7 @@ import { usePathname, useRouter } from "next/navigation";
 import { useState, type ReactNode } from "react";
 import { getSupabase } from "@/lib/supabase";
 import { useSession } from "@/components/session";
+import { FraudNotifier } from "@/components/FraudNotifier";
 import { Button, cx, Icon } from "@/components/ui";
 
 const NAV = [
@@ -79,6 +80,8 @@ export function AppShell({ children }: { children: ReactNode }) {
       <main id="main" className="mx-auto w-full max-w-[90rem] flex-1 px-4 py-6 sm:px-6">
         {children}
       </main>
+
+      <FraudNotifier userId={session.user.id} />
 
       <footer className="border-t border-line">
         <p className="mx-auto max-w-[90rem] px-4 py-3 text-xs text-ink-3 sm:px-6">
