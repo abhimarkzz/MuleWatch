@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { ApiError, apiRequest, errorMessage } from "@/lib/api-client";
+import { interpretEvaluation, type EvaluationOutcome, type PredictionResult, type QueuedResult } from "@/lib/evaluation";
 import { formatProbability } from "@/lib/format";
 import { Button, cx, Field, Icon, inputClass, Mono, Notice, PageHeader, Panel } from "@/components/ui";
 
@@ -23,17 +24,6 @@ type FormValues = {
 
 type FieldErrors = Partial<Record<keyof FormValues, string>>;
 
-type PredictionResult = {
-  transaction_id: string;
-  external_transaction_id: string;
-  predicted_is_fraud: boolean;
-  fraud_probability: number;
-  model_version: string;
-  decision_threshold?: number | null;
-  saved_to_supabase: boolean;
-  alert_created: boolean;
-};
-
 // Example values only; edit them to describe the transaction under review.
 const INITIAL_FORM: FormValues = {
   type: "TRANSFER",
@@ -48,8 +38,8 @@ const INITIAL_FORM: FormValues = {
   destination_account_external_id: "C200200",
 };
 
-// Server allows 90 s for a Render cold start; the browser waits slightly longer.
-const CLIENT_TIMEOUT_MS = 100_000;
+// Queuing only waits for the Kafka broker's acknowledgement, not the model.
+const CLIENT_TIMEOUT_MS = 30_000;
 
 function validate(form: FormValues): FieldErrors {
   const errors: FieldErrors = {};
@@ -83,11 +73,11 @@ export function EvaluateTransaction() {
   const [submitting, setSubmitting] = useState(false);
   const [elapsed, setElapsed] = useState(0);
   const [failure, setFailure] = useState<{ message: string; retryable: boolean } | null>(null);
-  const [result, setResult] = useState<PredictionResult | null>(null);
+  const [result, setResult] = useState<EvaluationOutcome | null>(null);
   const formRef = useRef<HTMLFormElement>(null);
 
-  // Reusing the reference on retry lets the server upsert instead of
-  // inserting a duplicate if an earlier attempt saved but its response was lost.
+  // Reusing the reference on retry keeps one Kafka key and one database row
+  // (the consumer's save upserts on it) if an earlier attempt's response was lost.
   const attemptRef = useRef<{ fingerprint: string; reference: string } | null>(null);
 
   useEffect(() => {
@@ -127,7 +117,7 @@ export function EvaluateTransaction() {
     setResult(null);
 
     try {
-      const prediction = await apiRequest<PredictionResult>("/api/predict", {
+      const response = await apiRequest<unknown>("/api/transactions/queue", {
         method: "POST",
         timeoutMs: CLIENT_TIMEOUT_MS,
         body: {
@@ -145,19 +135,15 @@ export function EvaluateTransaction() {
         },
       });
 
-      if (typeof prediction.predicted_is_fraud !== "boolean" || typeof prediction.fraud_probability !== "number") {
-        throw new ApiError("The server returned an unexpected prediction response.", 502, false);
-      }
-
-      setResult(prediction);
+      setResult(interpretEvaluation(response));
       // A later submission is a new transaction even if the fields match.
       attemptRef.current = null;
     } catch (error) {
       setFailure({
         message:
           error instanceof ApiError && error.code === "TIMEOUT"
-            ? "No response after 100 seconds. The model service may still be starting; retrying is safe and will not create a duplicate."
-            : errorMessage(error, "The prediction could not be completed."),
+            ? "No response after 30 seconds. Retrying is safe and will not create a duplicate."
+            : errorMessage(error, "The transaction could not be queued."),
         retryable: !(error instanceof ApiError) || error.retryable,
       });
     } finally {
@@ -194,7 +180,7 @@ export function EvaluateTransaction() {
     <>
       <PageHeader
         title="Evaluate a transaction"
-        description="Score a transaction with the deployed Random Forest model. The result is stored, and the model opens an alert if the score meets its decision threshold."
+        description="Queue a transaction for scoring by the deployed Random Forest model. It is scored and stored in the background, and an alert opens if the score meets the decision threshold."
       />
 
       <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_22rem]">
@@ -293,7 +279,7 @@ export function EvaluateTransaction() {
 
             <div className="flex flex-wrap items-center gap-2 bg-canvas/60 px-5 py-3.5">
               <Button type="submit" variant="primary" busy={submitting}>
-                {submitting ? "Scoring…" : "Score transaction"}
+                {submitting ? "Queuing…" : "Queue for scoring"}
               </Button>
               <Button variant="ghost" onClick={reset} disabled={submitting}>
                 Reset to example
@@ -305,19 +291,15 @@ export function EvaluateTransaction() {
         <div className="space-y-4" aria-live="polite">
           {submitting && (
             <Panel className="p-4">
-              <p className="font-medium">Waiting for the model service · {elapsed}s</p>
-              <p className="mt-1 text-ink-2">
-                {elapsed >= 8
-                  ? "The hosted model sleeps when idle and can take up to a minute to start. Keep this page open."
-                  : "Sending features to the inference API."}
-              </p>
+              <p className="font-medium">Queuing the transaction · {elapsed}s</p>
+              <p className="mt-1 text-ink-2">Sending it to the transaction queue.</p>
             </Panel>
           )}
 
           {failure && !submitting && (
             <Notice
               tone="danger"
-              title="Scoring did not complete"
+              title="The transaction was not queued"
               action={
                 failure.retryable && (
                   <Button size="sm" onClick={() => formRef.current?.requestSubmit()}>
@@ -330,15 +312,16 @@ export function EvaluateTransaction() {
             </Notice>
           )}
 
-          {result && !submitting && <PredictionCard result={result} />}
+          {result?.kind === "queued" && !submitting && <QueuedCard queued={result.queued} />}
+          {result?.kind === "scored" && !submitting && <PredictionCard result={result.prediction} />}
 
           {!result && !failure && !submitting && (
             <Panel className="p-4 text-ink-2">
               <p className="font-medium text-ink">How scores are produced</p>
               <p className="mt-1">
-                The eight features on the left are sent to a FastAPI service running a scikit-learn Random Forest
-                trained on a 100,000-row PaySim sample. It returns a fraud probability; the service compares it with
-                a threshold tuned for F1 on out-of-fold training predictions.
+                The eight features on the left are queued on Kafka. A FastAPI service running a scikit-learn Random
+                Forest, trained on a 100,000-row PaySim sample, picks them up, returns a fraud probability and
+                compares it with a threshold tuned for F1 on out-of-fold training predictions.
               </p>
               <p className="mt-2 text-xs text-ink-3">PaySim is synthetic. Scores describe model behaviour, not real customers.</p>
             </Panel>
@@ -346,6 +329,48 @@ export function EvaluateTransaction() {
         </div>
       </div>
     </>
+  );
+}
+
+function QueuedCard({ queued }: { queued: QueuedResult }) {
+  return (
+    <Panel className="overflow-hidden">
+      <div className="border-b border-line bg-canvas px-4 py-3">
+        <p className="flex items-center gap-1.5 font-semibold">
+          <Icon name="check" />
+          Queued · prediction pending
+        </p>
+        <p className="mt-0.5 text-xs text-ink-2">The transaction is in the queue. It has not been scored yet.</p>
+      </div>
+
+      <div className="space-y-4 p-4">
+        <p className="text-ink-2">
+          The model scores it in the background, usually within a minute. The hosted model sleeps when idle, so the
+          first transaction after a quiet period can take longer. If it is flagged, an alert opens in the queue.
+        </p>
+
+        <dl className="grid grid-cols-2 gap-3 text-[0.8125rem]">
+          <div className="col-span-2">
+            <dt className="text-xs text-ink-3">Reference</dt>
+            <dd>
+              <Mono className="break-all">{queued.external_transaction_id}</Mono>
+            </dd>
+          </div>
+          <div>
+            <dt className="text-xs text-ink-3">Partition</dt>
+            <dd className="tabular-nums">{queued.partition ?? "—"}</dd>
+          </div>
+          <div>
+            <dt className="text-xs text-ink-3">Offset</dt>
+            <dd className="tabular-nums">{queued.offset ?? "—"}</dd>
+          </div>
+        </dl>
+
+        <Link href="/alerts?sort=newest" className="inline-flex items-center gap-1.5 text-[0.8125rem] font-medium text-accent hover:underline">
+          Check the alert queue <Icon name="arrow-right" />
+        </Link>
+      </div>
+    </Panel>
   );
 }
 
