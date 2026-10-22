@@ -466,3 +466,31 @@ def test_flagged_response_without_reference_is_not_committed():
     consumer, producer = FakeConsumer(), FakeProducer()
     assert handle(c, record(), consumer, producer) is Outcome.RETRY
     assert consumer.commits == []
+
+
+def test_cold_path_wake_is_best_effort_and_never_blocks_the_commit():
+    pings = []
+
+    def handler(request):
+        if request.url.path == "/wake":
+            pings.append(request.headers.get("x-api-key"))
+            raise httpx.ConnectError("asleep")
+        return flagged()
+
+    settings = KafkaSettings.from_env({**ENV, "COLD_PATH_WAKE_URL": "https://cold.test/wake"})
+    c = TransactionConsumer(
+        settings,
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        sleep=lambda s: asyncio.sleep(0),
+    )
+    consumer, producer = FakeConsumer(), FakeProducer()
+    consumer.remember(record())
+
+    async def scenario():
+        outcome = await c.handle(record(), consumer, producer)
+        await asyncio.gather(*c._background)
+        return outcome
+
+    assert asyncio.run(scenario()) is Outcome.SUCCESS
+    assert pings == ["test-api-key"]
+    assert consumer.commits == [{("raw-transactions", 0): 6}]

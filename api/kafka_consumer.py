@@ -76,6 +76,7 @@ class KafkaSettings:
     retry_base_seconds: float = 2.0
     retry_max_seconds: float = 60.0
     request_timeout_seconds: float = 100.0
+    cold_path_wake_url: Optional[str] = None
 
     def __repr__(self) -> str:  # never print credentials
         return f"KafkaSettings(topic={self.topic!r}, group_id={self.group_id!r})"
@@ -109,6 +110,7 @@ class KafkaSettings:
             ca_cert=ca or None,
             frontend_url=required["MULEWATCH_FRONTEND_URL"].rstrip("/"),
             api_key=required["MULEWATCH_API_KEY"],
+            cold_path_wake_url=(env.get("COLD_PATH_WAKE_URL") or "").strip() or None,
         )
 
     def client_options(self) -> dict:
@@ -207,6 +209,7 @@ class TransactionConsumer:
         self._sleep = sleep
         self._task: Optional[asyncio.Task] = None
         self._retry_attempts: dict[tuple, int] = {}
+        self._background: set[asyncio.Task] = set()
         self.state = "idle"
         self.last_error: Optional[str] = None
 
@@ -409,7 +412,25 @@ class TransactionConsumer:
         except Exception as exc:
             logger.warning("Fraud alert publish failed (%s).", type(exc).__name__)
             return False
+        self._wake_cold_path()
         return True
+
+    def _wake_cold_path(self) -> None:
+        """Best effort: nudge a sleeping cold-path service. Never awaited, so it
+        can't delay or fail the commit; the event already waits in Kafka."""
+        url = self.settings.cold_path_wake_url
+        if not url or self._http is None:
+            return
+
+        async def ping() -> None:
+            try:
+                await self._http.post(url, headers={"x-api-key": self.settings.api_key}, timeout=5.0)
+            except Exception:
+                pass
+
+        task = asyncio.create_task(ping())
+        self._background.add(task)
+        task.add_done_callback(self._background.discard)
 
     async def _publish_dlq(self, producer, record, code: str) -> bool:
         headers = [

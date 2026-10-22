@@ -87,6 +87,13 @@ timeout and at most 400 output tokens; gpt-oss models are sent `reasoning_effort
 server-computed fan-out and layering counts. Rate limits return 429, timeouts 504,
 and other provider errors 502. Groq is never called automatically.
 
+### Cold path (Service B, optional)
+A second FastAPI service (`api/cold_path/`) consumes `fraud_alerts`. It runs a
+LangGraph pipeline that loads ledger context read-only, explains the Random
+Forest's score with exact tree-path contributions, and stores one document per
+event in MongoDB Atlas. SubgraphX is blocked because there is no trained GNN.
+See [`docs/COLD_PATH.md`](docs/COLD_PATH.md).
+
 ### Live fraud notifications
 Signed-in analysts get a red slide-in notice when a new transaction is flagged
 by the model (Supabase Realtime `INSERT` on `public.transactions`). It needs the

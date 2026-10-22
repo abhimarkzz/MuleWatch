@@ -104,8 +104,8 @@ it publishes to `KAFKA_FRAUD_ALERTS_TOPIC` (default `fraud_alerts`):
   - `source`
 - **Not included:** account IDs, raw features or database row IDs.
 
-Nothing in MuleWatch consumes this topic yet; it's the handoff for a later
-phase, so there's no processing loop.
+Service B (`docs/COLD_PATH.md`) consumes this topic with its own group and
+never publishes to it, so there's no processing loop.
 
 **Delivery is at least once.**
 
