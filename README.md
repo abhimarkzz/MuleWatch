@@ -67,6 +67,13 @@ linked transaction is embedded through the `alerts.transaction_id` foreign key;
 a reference search becomes an inner join on it, and a full UUID matches an
 alert or transaction ID. A page past the end returns the last page.
 
+### Asynchronous ingestion (optional)
+`POST /api/qstash/transactions` (QStash, signed) and `POST /api/transactions/queue`
+(Kafka producer → FastAPI consumer) score transactions in the background through
+the same `/api/predict` logic. The UI still calls `/api/predict` directly. See
+[`docs/KAFKA.md`](docs/KAFKA.md) for setup, retry/DLQ rules and the Render Free
+sleep limitation.
+
 ### Network
 `/api/network` calls the Postgres function
 `get_mulewatch_two_hop_transactions(edge_limit => 100)` (a recursive CTE that
@@ -145,6 +152,8 @@ local model instead of the deployed one.
 | `RENDER_API_URL` | server | Defaults to `https://mulewatch.onrender.com`. |
 | `MULEWATCH_ANALYST_EMAILS` | server | Optional comma-separated allowlist. Strongly recommended. |
 | `MULEWATCH_API_KEY` | server | Optional key for server-to-server `/api/predict` calls. |
+| `QSTASH_CURRENT_SIGNING_KEY`, `QSTASH_NEXT_SIGNING_KEY`, `QSTASH_RECEIVER_URL` | server | QStash receiver. |
+| `KAFKA_BROKERS`, `KAFKA_USERNAME`, `KAFKA_PASSWORD`, `KAFKA_CA_CERT`, `KAFKA_TOPIC`, `KAFKA_SASL_MECHANISM` | server | Kafka producer; see `docs/KAFKA.md`. The FastAPI consumer's variables are in `api/.env.example`. |
 | `NEXT_PUBLIC_ENABLE_SIGNUP` | browser | `true` shows the sign-up form. Off by default. |
 
 The seeding script reads `SUPABASE_URL` and `SUPABASE_SECRET_KEY` from the

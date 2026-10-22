@@ -8,6 +8,12 @@ import pandas as pd
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
+# Render may start this as `api.main` (repository root) or `main` (api/).
+try:
+    from api.kafka_consumer import KafkaSettings, TransactionConsumer
+except ImportError:
+    from kafka_consumer import KafkaSettings, TransactionConsumer
+
 
 MODELS_DIR = Path(__file__).resolve().parent / "models"
 
@@ -54,7 +60,19 @@ async def lifespan(app: FastAPI):
         f"Fraud decision threshold: {threshold:.6f}"
     )
 
-    yield
+    # Optional Kafka consumer. It runs as a background task, so /health and
+    # /predict keep serving whether or not Kafka is reachable.
+    settings = KafkaSettings.from_env()
+    consumer = TransactionConsumer(settings) if settings else None
+    app.state.kafka_consumer = consumer
+    if consumer:
+        consumer.start()
+
+    try:
+        yield
+    finally:
+        if consumer:
+            await consumer.stop()
 
 
 app = FastAPI(
@@ -108,7 +126,13 @@ def health():
         "fraud_threshold": getattr(
             app.state, "fraud_threshold", 0.5
         ),
+        "kafka_consumer": _kafka_state(),
     }
+
+
+def _kafka_state() -> str:
+    consumer = getattr(app.state, "kafka_consumer", None)
+    return consumer.state if consumer else "disabled"
 
 
 @app.post("/predict")

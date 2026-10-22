@@ -3,3 +3,5 @@ uvicorn[standard]
 pandas
 scikit-learn==1.6.1
 joblib==1.6.0
+aiokafka==0.14.0
+httpx>=0.28,<1
