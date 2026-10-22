@@ -15,7 +15,8 @@ caller ──POST /api/transactions/queue──▶ Vercel (KafkaJS producer)
                                              ▼
                        Vercel /api/predict ──▶ Render /predict ──▶ Supabase upsert
                                              │
-                      success: commit offset · permanent: raw-transactions-dlq, then commit
+                      success: if flagged → fraud_alerts, then commit offset
+                      permanent: raw-transactions-dlq, then commit
                       transient: no commit, retry with backoff
 ```
 
@@ -62,7 +63,8 @@ How each record is handled:
 
 | Result | Action |
 | --- | --- |
-| `/api/predict` returns 200 with `saved_to_supabase: true` | Commit `offset + 1`. |
+| `/api/predict` returns 200 with `saved_to_supabase: true` | If `predicted_is_fraud` is true, publish a `fraud_alerts` event first. Then commit `offset + 1`. |
+| The `fraud_alerts` publish fails | No commit; retry. The replay re-runs the idempotent save and publishes again. |
 | Invalid JSON or field, record over 64 KB, or `/api/predict` 400/413/422 | Publish to `raw-transactions-dlq` (original key and value, plus headers `mulewatch-error`, source topic, partition and offset, and failure time), then commit. |
 | DLQ publish fails | No commit; retry. |
 | Timeout, network error, 401/403/404/429/5xx, or a 200 without a confirmed save | No commit. Seek back and retry after 2, 4, 8 … 60 s (capped). |
@@ -83,11 +85,53 @@ Other behaviour:
 - **Logs:** they contain only partition, offset and an error code. They never
   contain payloads, keys, credentials or broker hosts.
 
+## `fraud_alerts` events
+
+For every record the consumer scores and saves with `predicted_is_fraud: true`,
+it publishes to `KAFKA_FRAUD_ALERTS_TOPIC` (default `fraud_alerts`):
+
+- **Key:** `external_transaction_id`.
+- **Value:** JSON with these fields:
+  - `event_type` (`fraud_alert`)
+  - `event_id` (`<external_transaction_id>:model-flag`)
+  - `external_transaction_id`
+  - `predicted_is_fraud`
+  - `fraud_probability`
+  - `decision_threshold`
+  - `model_version`
+  - `alert_created`
+  - `event_time`
+  - `source`
+- **Not included:** account IDs, raw features or database row IDs.
+
+Nothing in MuleWatch consumes this topic yet; it's the handoff for a later
+phase, so there's no processing loop.
+
+**Delivery is at least once.**
+
+- **Normal case:** the event is published before the source offset is
+  committed, so a crash or broker failure can't lose it.
+- **When a duplicate happens:** if the event is published but the commit is
+  then lost (crash or rebalance in between), the record is replayed and the
+  event is published again.
+- **Telling duplicates apart:** a replayed event has the same key and
+  `event_id`, so downstream consumers should de-duplicate on `event_id`.
+  `alert_created` is `false` on a replay, because the alert row already
+  exists.
+- **Why not exactly once:** that would need Kafka transactions spanning
+  the consume, the external HTTP save and the publish, which this design can't
+  provide.
+
+**What it doesn't cover:** only transactions scored through Kafka produce
+events. A transaction scored by calling `/api/predict` directly, or through
+QStash, doesn't.
+
 ## Aiven setup (manual)
 
 1. **Create the topics** in the Aiven console:
    - `raw-transactions`
    - `raw-transactions-dlq`
+   - `fraud_alerts`
 
    One partition each is enough for this prototype. Producers never create
    topics (`allowAutoTopicCreation: false`).
@@ -127,6 +171,7 @@ Other behaviour:
 | `KAFKA_SASL_MECHANISM` | |
 | `KAFKA_TOPIC` | |
 | `KAFKA_DLQ_TOPIC` | |
+| `KAFKA_FRAUD_ALERTS_TOPIC` | Optional. Defaults to `fraud_alerts`. |
 | `KAFKA_CONSUMER_GROUP` | |
 | `MULEWATCH_FRONTEND_URL` | `https://mule-watch.vercel.app` |
 | `MULEWATCH_API_KEY` | The **same** value as on Vercel. |

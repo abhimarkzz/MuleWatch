@@ -75,8 +75,9 @@ class FakeConsumer:
 
 
 class FakeProducer:
-    def __init__(self, fail=False):
+    def __init__(self, fail=False, fail_times=0):
         self.fail = fail
+        self.fail_times = fail_times
         self.sent = []
 
     async def start(self):
@@ -86,8 +87,9 @@ class FakeProducer:
         pass
 
     async def send_and_wait(self, topic, value=None, key=None, headers=None):
-        if self.fail:
-            raise ConnectionError("dlq down")
+        if self.fail or self.fail_times > 0:
+            self.fail_times -= 1
+            raise ConnectionError("broker down")
         self.sent.append({"topic": topic, "value": value, "key": key, "headers": dict(headers)})
 
 
@@ -367,3 +369,100 @@ def test_lifespan_starts_and_stops_the_consumer(monkeypatch):
     with TestClient(main.app) as client:
         assert client.get("/health").json()["kafka_consumer"] == "running"
     assert events == ["init", "start", "stop"]
+
+
+# fraud_alerts events ---------------------------------------------------------
+
+FLAGGED_RESPONSE = {
+    "transaction_id": "db-row-uuid",
+    "external_transaction_id": "ext-1",
+    "predicted_is_fraud": True,
+    "fraud_probability": 0.93,
+    "model_version": "random-forest-tuned-v2",
+    "decision_threshold": 0.405,
+    "saved_to_supabase": True,
+    "alert_created": True,
+}
+
+
+def flagged(**overrides):
+    return httpx.Response(200, json={**FLAGGED_RESPONSE, **overrides})
+
+
+def test_flagged_transaction_publishes_one_keyed_event_then_commits():
+    c, _, _ = make(Frontend([flagged()]))
+    consumer, producer = FakeConsumer(), FakeProducer()
+    assert handle(c, record(), consumer, producer) is Outcome.SUCCESS
+
+    [sent] = producer.sent
+    assert sent["topic"] == "fraud_alerts"
+    assert sent["key"] == b"ext-1"
+    event = json.loads(sent["value"])
+    assert event["event_id"] == "ext-1:model-flag"
+    assert event["external_transaction_id"] == "ext-1"
+    assert event["predicted_is_fraud"] is True
+    assert event["fraud_probability"] == 0.93
+    assert event["model_version"] == "random-forest-tuned-v2"
+    assert "event_time" in event
+    # No database row ID, account data or raw features.
+    for leak in ("db-row-uuid", "source_account", "amount", "oldbalance"):
+        assert leak not in sent["value"].decode()
+    assert consumer.commits == [{("raw-transactions", 0): 6}]
+
+
+def test_topic_is_configurable():
+    settings = KafkaSettings.from_env({**ENV, "KAFKA_FRAUD_ALERTS_TOPIC": "fraud-alerts-test"})
+    assert settings.fraud_alerts_topic == "fraud-alerts-test"
+    assert KafkaSettings.from_env(ENV).fraud_alerts_topic == "fraud_alerts"
+
+
+def test_non_fraud_publishes_nothing():
+    c, _, _ = make(Frontend([flagged(predicted_is_fraud=False)]))
+    consumer, producer = FakeConsumer(), FakeProducer()
+    assert handle(c, record(), consumer, producer) is Outcome.SUCCESS
+    assert producer.sent == []
+    assert len(consumer.commits) == 1
+
+
+def test_unsaved_flagged_result_publishes_nothing_and_retries():
+    c, _, _ = make(Frontend([flagged(saved_to_supabase=False)]))
+    consumer, producer = FakeConsumer(), FakeProducer()
+    assert handle(c, record(), consumer, producer) is Outcome.RETRY
+    assert producer.sent == []
+    assert consumer.commits == []
+
+
+def test_broker_failure_keeps_the_source_record_uncommitted_then_retry_succeeds():
+    c, frontend, sleeps = make(Frontend([flagged(), flagged(alert_created=False)]))
+    consumer, producer = FakeConsumer(), FakeProducer(fail_times=1)
+    rec = record()
+
+    assert handle(c, rec, consumer, producer) is Outcome.RETRY
+    assert consumer.commits == []
+    assert consumer.seeks == [5]
+    assert c.last_error == "fraud_alert_publish_failed"
+    assert sleeps == [2.0]
+
+    # Redelivery re-runs the idempotent save, then publishes and commits.
+    assert handle(c, rec, consumer, producer) is Outcome.SUCCESS
+    assert len(frontend.calls) == 2
+    assert [s["topic"] for s in producer.sent] == ["fraud_alerts"]
+    assert consumer.commits == [{("raw-transactions", 0): 6}]
+
+
+def test_redelivery_after_commit_loss_repeats_the_same_event_identity():
+    """At-least-once: a replay can publish again, with an identical key and event_id."""
+    c, _, _ = make(Frontend([flagged(), flagged(alert_created=False)]))
+    consumer, producer = FakeConsumer(), FakeProducer()
+    handle(c, record(offset=5), consumer, producer)
+    handle(c, record(offset=5), consumer, producer)
+    events = [json.loads(s["value"]) for s in producer.sent]
+    assert [s["key"] for s in producer.sent] == [b"ext-1", b"ext-1"]
+    assert {e["event_id"] for e in events} == {"ext-1:model-flag"}
+
+
+def test_flagged_response_without_reference_is_not_committed():
+    c, _, _ = make(Frontend([flagged(external_transaction_id=None)]))
+    consumer, producer = FakeConsumer(), FakeProducer()
+    assert handle(c, record(), consumer, producer) is Outcome.RETRY
+    assert consumer.commits == []

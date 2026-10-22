@@ -9,7 +9,8 @@ outage replays the record instead of losing it. Replays are safe because
 alerts table is unique on (transaction_id, reason).
 
 Outcomes per record:
-  * success    -> commit offset + 1
+  * success    -> if flagged, publish a fraud_alerts event; then commit
+                  offset + 1 (a failed event publish leaves it uncommitted)
   * permanent  -> publish to the DLQ topic, commit only after the DLQ ack
   * retryable  -> no commit; seek back and retry with capped backoff
 
@@ -63,6 +64,7 @@ class KafkaSettings:
     password: str
     topic: str
     dlq_topic: str
+    fraud_alerts_topic: str
     group_id: str
     mechanism: str
     ca_cert: Optional[str]
@@ -101,6 +103,7 @@ class KafkaSettings:
             password=required["KAFKA_PASSWORD"],
             topic=(env.get("KAFKA_TOPIC") or "raw-transactions").strip(),
             dlq_topic=(env.get("KAFKA_DLQ_TOPIC") or "raw-transactions-dlq").strip(),
+            fraud_alerts_topic=(env.get("KAFKA_FRAUD_ALERTS_TOPIC") or "fraud_alerts").strip(),
             group_id=(env.get("KAFKA_CONSUMER_GROUP") or "mulewatch-predict-consumer").strip(),
             mechanism=(env.get("KAFKA_SASL_MECHANISM") or "PLAIN").strip().upper(),
             ca_cert=ca or None,
@@ -303,7 +306,13 @@ class TransactionConsumer:
 
         tp = TopicPartition(record.topic, record.partition)
         coords = (record.topic, record.partition, record.offset)
-        outcome, code = await self.process(record)
+        outcome, code, prediction = await self._score(record)
+
+        if outcome is Outcome.SUCCESS and prediction.get("predicted_is_fraud") is True:
+            if not await self._publish_fraud_alert(producer, prediction):
+                # The transaction is saved, but the event is not: replaying the
+                # record re-runs the idempotent save and retries the event.
+                code, outcome = "fraud_alert_publish_failed", Outcome.RETRY
 
         if outcome is Outcome.PERMANENT:
             if await self._publish_dlq(producer, record, code):
@@ -332,9 +341,14 @@ class TransactionConsumer:
         return Outcome.RETRY
 
     async def process(self, record) -> tuple[Outcome, str]:
+        outcome, code, _ = await self._score(record)
+        return outcome, code
+
+    async def _score(self, record) -> tuple[Outcome, str, dict]:
+        """Like process, plus /api/predict's body on success."""
         payload, error = parse_record(record)
         if error:
-            return Outcome.PERMANENT, error
+            return Outcome.PERMANENT, error, {}
 
         if self._http is None:
             self._http = httpx.AsyncClient(timeout=self.settings.request_timeout_seconds)
@@ -345,21 +359,57 @@ class TransactionConsumer:
                 headers={"x-api-key": self.settings.api_key},
             )
         except httpx.TimeoutException:
-            return Outcome.RETRY, "predict_timeout"
+            return Outcome.RETRY, "predict_timeout", {}
         except httpx.HTTPError:
-            return Outcome.RETRY, "predict_unreachable"
+            return Outcome.RETRY, "predict_unreachable", {}
 
         if response.status_code == 200:
             try:
-                saved = response.json().get("saved_to_supabase") is True
+                body = response.json()
             except ValueError:
-                saved = False
-            return (Outcome.SUCCESS, "ok") if saved else (Outcome.RETRY, "predict_unconfirmed")
+                body = None
+            if isinstance(body, dict) and body.get("saved_to_supabase") is True:
+                return Outcome.SUCCESS, "ok", body
+            return Outcome.RETRY, "predict_unconfirmed", {}
         if response.status_code in PERMANENT_STATUSES:
-            return Outcome.PERMANENT, f"predict_rejected_{response.status_code}"
+            return Outcome.PERMANENT, f"predict_rejected_{response.status_code}", {}
         # 401/403 (key mismatch), 404 (wrong URL), 429 and 5xx (model or
         # database outage) can all recover, so the record waits.
-        return Outcome.RETRY, f"predict_status_{response.status_code}"
+        return Outcome.RETRY, f"predict_status_{response.status_code}", {}
+
+    async def _publish_fraud_alert(self, producer, prediction: dict) -> bool:
+        """Hands a model-flagged, persisted transaction to fraud_alerts.
+
+        Keyed by external_transaction_id, with a deterministic event_id, so a
+        replayed record yields the same key and ID for consumers to dedupe.
+        Carries no account IDs, raw features or database row IDs.
+        """
+        reference = prediction.get("external_transaction_id")
+        if not isinstance(reference, str) or not reference:
+            return False
+        event = {
+            "event_type": "fraud_alert",
+            "event_id": f"{reference}:model-flag",
+            "external_transaction_id": reference,
+            "predicted_is_fraud": True,
+            "fraud_probability": prediction.get("fraud_probability"),
+            "decision_threshold": prediction.get("decision_threshold"),
+            "model_version": prediction.get("model_version"),
+            "alert_created": prediction.get("alert_created"),
+            "event_time": datetime.now(timezone.utc).isoformat(),
+            "source": "mulewatch-kafka-consumer",
+        }
+        try:
+            await producer.send_and_wait(
+                self.settings.fraud_alerts_topic,
+                value=json.dumps(event).encode(),
+                key=reference.encode(),
+                headers=[("content-type", b"application/json")],
+            )
+        except Exception as exc:
+            logger.warning("Fraud alert publish failed (%s).", type(exc).__name__)
+            return False
+        return True
 
     async def _publish_dlq(self, producer, record, code: str) -> bool:
         headers = [
