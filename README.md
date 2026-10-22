@@ -74,6 +74,19 @@ the same `/api/predict` logic. The UI still calls `/api/predict` directly. See
 [`docs/KAFKA.md`](docs/KAFKA.md) for setup, retry/DLQ rules and the Render Free
 sleep limitation.
 
+### Analyst Copilot (optional)
+On `/network?alert=<id>` (linked from the alert drawer), **Generate AI Report** calls
+`POST /api/copilot` with only the alert ID. The route checks the analyst session,
+then builds the alert's network server-side: the flagged transfer, the receiver's
+onward transfers strictly later and less than 24 hours after it, and the sender's
+other transfers within 24 hours either side. Each query is capped at 25 rows.
+Time is `transaction_step` (PaySim hours), because the seeded `created_at` values
+are bulk-load times. Accounts are relabelled (SENDER, RECEIVER, ACCOUNT_n), and the
+result goes to Groq (`GROQ_MODEL`, default `openai/gpt-oss-20b`, with a 20 s
+timeout and at most 400 output tokens; gpt-oss models are sent `reasoning_effort: "low"` and `include_reasoning: false`). The route returns exactly three bullets plus
+server-computed fan-out and layering counts. Rate limits return 429, timeouts 504,
+and other provider errors 502. Groq is never called automatically.
+
 ### Network
 `/api/network` calls the Postgres function
 `get_mulewatch_two_hop_transactions(edge_limit => 100)` (a recursive CTE that
@@ -154,6 +167,7 @@ local model instead of the deployed one.
 | `MULEWATCH_API_KEY` | server | Optional key for server-to-server `/api/predict` calls. |
 | `QSTASH_CURRENT_SIGNING_KEY`, `QSTASH_NEXT_SIGNING_KEY`, `QSTASH_RECEIVER_URL` | server | QStash receiver. |
 | `KAFKA_BROKERS`, `KAFKA_USERNAME`, `KAFKA_PASSWORD`, `KAFKA_CA_CERT`, `KAFKA_TOPIC`, `KAFKA_SASL_MECHANISM` | server | Kafka producer; see `docs/KAFKA.md`. The FastAPI consumer's variables are in `api/.env.example`. |
+| `GROQ_API_KEY`, `GROQ_MODEL` | server | Analyst Copilot. |
 | `NEXT_PUBLIC_ENABLE_SIGNUP` | browser | `true` shows the sign-up form. Off by default. |
 
 The seeding script reads `SUPABASE_URL` and `SUPABASE_SECRET_KEY` from the

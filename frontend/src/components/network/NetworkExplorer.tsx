@@ -6,6 +6,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ForceGraphMethods } from "react-force-graph-2d";
 import { ApiError, apiRequest, errorMessage, isAbort } from "@/lib/api-client";
 import { accountLabel, formatAmount, formatProbability, shortId } from "@/lib/format";
+import { CopilotPanel } from "./CopilotPanel";
 import { Button, cx, EmptyState, Icon, Mono, Notice, PageHeader, Panel, Spinner } from "@/components/ui";
 import {
   countNewAccounts,
@@ -58,6 +59,7 @@ type LoadState = { kind: "loading" } | { kind: "error"; message: string } | { ki
 export function NetworkExplorer() {
   const searchParams = useSearchParams();
   const focusAccount = searchParams.get("account");
+  const copilotAlert = searchParams.get("alert");
 
   const graphRef = useRef<ForceGraphMethods<GraphNode, GraphLink> | undefined>(undefined);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -509,7 +511,8 @@ export function NetworkExplorer() {
             )}
           </div>
 
-          <aside aria-label="Inspector" className="min-w-0">
+          <aside aria-label="Inspector" className="min-w-0 space-y-4">
+            {copilotAlert && /^[0-9a-f-]{36}$/i.test(copilotAlert) && <CopilotPanel alertId={copilotAlert} />}
             <Panel className="xl:sticky xl:top-20">
               {selectedAccount ? (
                 <AccountInspector

@@ -147,10 +147,10 @@ function AlertDetails({
         )}
         {accountId && (
           <Link
-            href={`/network?account=${encodeURIComponent(accountId)}`}
+            href={`/network?account=${encodeURIComponent(accountId)}&alert=${encodeURIComponent(alert.id)}`}
             className="mt-3 inline-flex items-center gap-1.5 text-[0.8125rem] font-medium text-accent hover:underline"
           >
-            Trace sender in network <Icon name="arrow-right" />
+            Trace sender in network and AI report <Icon name="arrow-right" />
           </Link>
         )}
       </section>
