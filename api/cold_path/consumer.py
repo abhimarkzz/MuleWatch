@@ -18,6 +18,11 @@ from api.cold_path.pipeline import PermanentError, RetryableError
 
 logger = logging.getLogger("mulewatch.cold_path")
 
+# An unexpected error that repeats this many times on one record is treated as
+# a poison message and sent to the DLQ, so it can't block the partition
+# forever. Known outages (MongoDB, Supabase) keep retrying without a cap.
+MAX_UNEXPECTED_ATTEMPTS = 5
+
 
 @dataclass(frozen=True)
 class ColdPathSettings:
@@ -83,7 +88,10 @@ class FraudAlertConsumer(TransactionConsumer):
             return Outcome.PERMANENT, exc.code, {}
         except RetryableError as exc:
             return Outcome.RETRY, exc.code, {}
-        except Exception as exc:  # unexpected: keep the event, retry later
+        except Exception as exc:  # unexpected: retry a few times, then DLQ
+            attempts = self._retry_attempts.get((record.topic, record.partition, record.offset), 0) + 1
+            if attempts >= MAX_UNEXPECTED_ATTEMPTS:
+                return Outcome.PERMANENT, "pipeline_error_exhausted", {}
             return Outcome.RETRY, f"pipeline_{type(exc).__name__}", {}
         if state.get("duplicate"):
             logger.info("Record p%d@%d already explained; committing.", record.partition, record.offset)

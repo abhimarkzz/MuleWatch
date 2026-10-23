@@ -20,7 +20,7 @@ from typing import Any, Optional, TypedDict
 from langgraph.graph import END, START, StateGraph
 
 from api.cold_path.explain import explain_prediction
-from api.cold_path.ledger import LedgerUnavailable, TransactionMissing
+from api.cold_path.ledger import LedgerRejected, LedgerUnavailable, TransactionMissing
 
 PIPELINE_VERSION = "cold-path-1"
 MAX_EVENT_BYTES = 16 * 1024
@@ -88,6 +88,8 @@ def build_pipeline(*, store, ledger, model):
             return {"context": await ledger.context(state["event"]["external_transaction_id"])}
         except TransactionMissing:
             raise PermanentError("transaction_not_found") from None
+        except LedgerRejected:
+            raise PermanentError("supabase_rejected_query") from None
         except LedgerUnavailable as exc:
             raise RetryableError(f"supabase_{exc}") from None
 
@@ -119,9 +121,15 @@ def build_pipeline(*, store, ledger, model):
             "pipeline_version": PIPELINE_VERSION,
             "created_at": datetime.now(timezone.utc),
         }
+        from pymongo.errors import DocumentTooLarge, InvalidDocument, WriteError
+
         try:
             return {"stored": await store.save(document)}
-        except Exception as exc:
+        except (DocumentTooLarge, InvalidDocument, WriteError):
+            # MongoDB will never accept this document; don't retry forever.
+            # (Duplicate keys are handled inside store.save.)
+            raise PermanentError("mongo_rejected_document") from None
+        except Exception as exc:  # outages, timeouts: retry
             raise RetryableError(f"mongo_{type(exc).__name__}") from None
 
     graph = StateGraph(State)

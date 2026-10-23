@@ -352,3 +352,129 @@ def test_explanation_reconstructs_the_real_models_probability():
     assert {c["feature"] for c in result["contributions"]} <= set(FEATURES)
     with pytest.raises(ValueError):
         explain_prediction(model, {"step": 1})
+
+
+# Reliability verification ----------------------------------------------------
+
+from pymongo.errors import DocumentTooLarge, DuplicateKeyError, ServerSelectionTimeoutError
+
+from api.cold_path.consumer import MAX_UNEXPECTED_ATTEMPTS
+from api.cold_path.store import ExplanationStore
+
+
+class FakeCollection:
+    """Mimics update_one($setOnInsert, upsert) and find_one on _id."""
+
+    def __init__(self, raise_on_update=None):
+        self.docs = {}
+        self.raise_on_update = raise_on_update
+
+    async def find_one(self, query, projection=None):
+        return self.docs.get(query["_id"])
+
+    async def update_one(self, query, update, upsert=False):
+        if self.raise_on_update:
+            raise self.raise_on_update
+        if query["_id"] in self.docs:
+            return SimpleNamespace(upserted_id=None)
+        self.docs[query["_id"]] = update["$setOnInsert"]
+        return SimpleNamespace(upserted_id=query["_id"])
+
+
+def real_store(collection):
+    return ExplanationStore("unused", "db", client={"db": {"fraud_explanations": collection}})
+
+
+def test_real_store_keeps_one_document_and_never_overwrites():
+    collection = FakeCollection()
+    store = real_store(collection)
+    assert asyncio.run(store.save({"_id": "e1", "v": 1})) is True
+    assert asyncio.run(store.save({"_id": "e1", "v": 2})) is False
+    assert collection.docs == {"e1": {"_id": "e1", "v": 1}}
+    assert asyncio.run(store.exists("e1")) is True
+    assert asyncio.run(store.exists("e2")) is False
+
+
+def test_concurrent_upsert_race_counts_as_already_stored():
+    store = real_store(FakeCollection(raise_on_update=DuplicateKeyError("E11000")))
+    assert asyncio.run(store.save({"_id": "e1"})) is False
+
+
+def test_duplicate_is_detected_before_context_or_explanation(fake_explainer):
+    collection = FakeCollection()
+    collection.docs["ext-1:model-flag"] = {"_id": "ext-1:model-flag"}
+    ledger = FakeLedger()
+    settings = ColdPathSettings.from_env(ENV)
+    c = FraudAlertConsumer(settings.kafka, build_pipeline(store=real_store(collection), ledger=ledger, model=object()))
+    kc = FakeConsumer()
+    assert handle(c, record(), kc, FakeProducer()) is Outcome.SUCCESS
+    assert ledger.calls == 0 and fake_explainer == []
+    assert len(collection.docs) == 1
+    assert kc.commits == [{("fraud_alerts", 0): 8}]
+
+
+def test_mongo_outage_retries_without_cap_and_recovers():
+    collection = FakeCollection(raise_on_update=ServerSelectionTimeoutError("no primary"))
+    c, _, _, sleeps = make(store=real_store(collection))
+    kc, producer = FakeConsumer(), FakeProducer()
+    rec = record()
+    for _ in range(MAX_UNEXPECTED_ATTEMPTS + 3):
+        assert handle(c, rec, kc, producer) is Outcome.RETRY
+    assert kc.commits == [] and producer.sent == []  # never parked in the DLQ
+    assert sleeps[-1] == 60.0  # backoff capped, not a busy loop
+
+    collection.raise_on_update = None
+    assert handle(c, rec, kc, producer) is Outcome.SUCCESS
+    assert kc.commits == [{("fraud_alerts", 0): 8}]
+    assert list(collection.docs) == ["ext-1:model-flag"]
+
+
+def test_document_mongo_rejects_goes_to_dlq_instead_of_looping():
+    c, _, _, _ = make(store=real_store(FakeCollection(raise_on_update=DocumentTooLarge("too big"))))
+    kc, producer = FakeConsumer(), FakeProducer()
+    assert handle(c, record(), kc, producer) is Outcome.SUCCESS
+    assert producer.sent[0]["headers"]["mulewatch-error"] == b"mongo_rejected_document"
+    assert len(kc.commits) == 1
+
+
+def test_supabase_400_goes_to_dlq_but_5xx_retries():
+    def ledger_for(status):
+        return Ledger("https://x", "k", httpx.AsyncClient(transport=httpx.MockTransport(lambda r: httpx.Response(status))))
+
+    c, _, _, _ = make(ledger=ledger_for(400))
+    kc, producer = FakeConsumer(), FakeProducer()
+    assert handle(c, record(), kc, producer) is Outcome.SUCCESS
+    assert producer.sent[0]["headers"]["mulewatch-error"] == b"supabase_rejected_query"
+
+    c, store, _, _ = make(ledger=ledger_for(503))
+    kc, producer = FakeConsumer(), FakeProducer()
+    assert handle(c, record(), kc, producer) is Outcome.RETRY
+    assert kc.commits == [] and producer.sent == [] and store.docs == {}
+
+
+def test_poison_event_is_retried_a_bounded_number_of_times_then_dlq():
+    class Exploding(FakeLedger):
+        async def context(self, reference):
+            raise RuntimeError("bug")
+
+    c, store, _, _ = make(ledger=Exploding())
+    kc, producer = FakeConsumer(), FakeProducer()
+    rec = record()
+    outcomes = [handle(c, rec, kc, producer) for _ in range(MAX_UNEXPECTED_ATTEMPTS)]
+    assert outcomes == [Outcome.RETRY] * (MAX_UNEXPECTED_ATTEMPTS - 1) + [Outcome.SUCCESS]
+    assert producer.sent[0]["headers"]["mulewatch-error"] == b"pipeline_error_exhausted"
+    assert kc.commits == [{("fraud_alerts", 0): 8}]  # committed only after the DLQ ack
+    assert store.docs == {}
+
+
+def test_poison_event_with_dlq_down_stays_uncommitted():
+    class Exploding(FakeLedger):
+        async def context(self, reference):
+            raise RuntimeError("bug")
+
+    c, _, _, _ = make(ledger=Exploding())
+    kc = FakeConsumer()
+    rec = record()
+    for _ in range(MAX_UNEXPECTED_ATTEMPTS + 2):
+        assert handle(c, rec, kc, FakeProducer(fail=True)) is Outcome.RETRY
+    assert kc.commits == []

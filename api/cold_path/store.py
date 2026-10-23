@@ -31,9 +31,15 @@ class ExplanationStore:
 
     async def save(self, document: dict) -> bool:
         """Idempotent insert. Returns True if this call created the document."""
-        result = await self._collection.update_one(
-            {"_id": document["_id"]}, {"$setOnInsert": document}, upsert=True
-        )
+        from pymongo.errors import DuplicateKeyError
+
+        try:
+            result = await self._collection.update_one(
+                {"_id": document["_id"]}, {"$setOnInsert": document}, upsert=True
+            )
+        except DuplicateKeyError:
+            # Two concurrent upserts for one _id: the other one stored it.
+            return False
         return result.upserted_id is not None
 
     async def close(self) -> None:

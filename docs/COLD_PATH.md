@@ -109,10 +109,13 @@ Service B reuses Service A's consumer code.
 
 | Case | Result |
 | --- | --- |
-| Malformed event, not a `fraud_alert`, missing ID, or ledger row not found | Published to `fraud_alerts_dlq` with an error header, then committed. |
+| Malformed event, not a `fraud_alert`, or missing ID | Published to `fraud_alerts_dlq` with an error header, then committed. |
+| Ledger row not found, or Supabase rejects the query (400) | Published to `fraud_alerts_dlq`, then committed. |
+| MongoDB rejects the document (`DocumentTooLarge`, `InvalidDocument`, `WriteError`) | Published to `fraud_alerts_dlq`, then committed. |
 | DLQ publish fails | No commit; retry. |
-| MongoDB or Supabase down, or an unexpected pipeline error | No commit. Seek back and retry after 2 to 60 s. |
-| Event already stored (same `event_id`) | Committed without recomputing. |
+| MongoDB or Supabase unreachable, timing out, or returning 5xx | No commit. Seek back and retry after 2 to 60 s, with no cap, because an outage can last hours. |
+| Unexpected pipeline error | Retried up to 5 times, then sent to the DLQ as `pipeline_error_exhausted`, so one bad event can't block the partition forever. |
+| Event already stored (same `event_id`) | Committed without loading context or recomputing. A concurrent duplicate write (`DuplicateKeyError`) also counts as already stored. |
 | Shutdown | The consumer task is cancelled and clients are closed. Uncommitted events are replayed on the next start. |
 
 Logs contain partition, offset and an error code only. They never contain

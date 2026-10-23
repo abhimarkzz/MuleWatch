@@ -26,6 +26,10 @@ class TransactionMissing(Exception):
     """No ledger row for the event's reference."""
 
 
+class LedgerRejected(Exception):
+    """PostgREST rejected the query (400): retrying the same event can't help."""
+
+
 class Ledger:
     def __init__(self, url: str, service_key: str, client: Optional[httpx.AsyncClient] = None):
         self._base = f"{url.rstrip('/')}/rest/v1/transactions"
@@ -37,6 +41,8 @@ class Ledger:
             response = await self._client.get(self._base, params=params, headers=self._headers)
         except httpx.HTTPError as exc:
             raise LedgerUnavailable(type(exc).__name__) from None
+        if response.status_code == 400:
+            raise LedgerRejected()
         if response.status_code != 200:
             raise LedgerUnavailable(f"status_{response.status_code}")
         rows = response.json()
