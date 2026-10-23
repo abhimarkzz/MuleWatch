@@ -161,3 +161,7 @@ Desktop.ini
 # ==========================================
 # Duplicate of .env with credentials (no leading dot, so **/.env misses it).
 /env
+
+# Research model artefacts (scripts/train_candidate_no_step.py); metrics
+# and thresholds stay committable, binaries do not.
+research/**/*.joblib

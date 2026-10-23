@@ -56,3 +56,39 @@ def test_temporal_split_never_overlaps():
     assert cutoff == 80
     assert X.loc[early, "step"].max() <= cutoff < X.loc[late, "step"].min()
     assert not (early & late).any() and (early | late).all()
+
+
+def test_chronological_splits_keep_the_holdout_in_the_future():
+    import pandas as pd
+    from scripts.benchmark import chronological_splits, temporal_split
+
+    X = pd.DataFrame({"step": list(range(1, 101))})
+    (train_cut, holdout_cut), train, validation, holdout = chronological_splits(X)
+    assert (train_cut, holdout_cut) == (60, 80)
+    assert X.loc[train, "step"].max() < X.loc[validation, "step"].min()
+    assert X.loc[validation, "step"].max() < X.loc[holdout, "step"].min()
+    assert int(train.sum() + validation.sum() + holdout.sum()) == len(X)
+    # Same future period as the two-way temporal split.
+    _, _, late = temporal_split(X)
+    assert (holdout == late).all()
+
+
+def test_swap_feature_changes_only_that_column_and_draws_from_the_donor():
+    import pandas as pd
+    from scripts.benchmark import swap_feature
+
+    target = pd.DataFrame({"step": [500, 600, 700], "amount": [1.0, 2.0, 3.0]})
+    donor = pd.DataFrame({"step": [10, 20], "amount": [9.0, 9.0]})
+    swapped = swap_feature(target, donor, "step", seed=1)
+    assert set(swapped["step"]) <= {10, 20}
+    assert swapped["amount"].tolist() == [1.0, 2.0, 3.0]
+    assert target["step"].tolist() == [500, 600, 700]  # input untouched
+
+
+def test_without_step_variant_removes_all_step_information():
+    import pandas as pd
+    from scripts.benchmark import VARIANTS
+
+    X = pd.DataFrame({"step": [1, 400], "amount": [5.0, 6.0]})
+    assert VARIANTS["without_step"](X)["step"].nunique() == 1
+    assert VARIANTS["all_features"](X).equals(X)

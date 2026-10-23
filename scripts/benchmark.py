@@ -215,6 +215,20 @@ def temporal_diagnostics() -> dict:
         y[late].to_numpy(), no_step.predict_proba(X_const[late])[:, fraud], no_step_threshold
     )
 
+    # Post-hoc mechanism probe (after the holdout was scored): force every
+    # late fraud row to one step value and see where scores collapse; count
+    # fraud in the last training band; read the forest's step split points.
+    step_probe = {
+        str(value): round(float(np.median(model.predict_proba(late_fraud.assign(step=value))[:, fraud])), 3)
+        for value in (150, 300, 340, 345, 348, 350, 355, 356, 500, 737)
+    }
+    edge = early & (X["step"] >= 350)
+    forest = model.named_steps["classifier"]
+    step_index = list(model.named_steps["preprocessor"].get_feature_names_out()).index("numeric__step")
+    step_thresholds = np.concatenate(
+        [t.tree_.threshold[t.tree_.feature == step_index] for t in forest.estimators_]
+    )
+
     def drift(column: str) -> dict:
         return {
             "train_fraud_median": float(X.loc[early & (y == 1), column].median()),
@@ -245,6 +259,143 @@ def temporal_diagnostics() -> dict:
         "test_fraud_at_or_above_stored_threshold": int((p_late_fraud >= threshold).sum()),
         "same_rows_with_step_moved_at_or_above_stored_threshold": int((p_in_range >= threshold).sum()),
         "control_clone_without_step": no_step_metrics,
+        "post_hoc_step_probe_median_probability": step_probe,
+        "last_training_band_350_to_cutoff": {"rows": int(edge.sum()), "fraud_rows": int(y[edge].sum())},
+        "forest_step_splits": {
+            "trees_splitting_on_step": int(sum((t.tree_.feature == step_index).any() for t in forest.estimators_)),
+            "trees": len(forest.estimators_),
+            "highest_thresholds": [round(float(v), 1) for v in np.sort(step_thresholds)[-3:]],
+        },
+    }
+
+
+def chronological_splits(X, train_q: float = 0.6, holdout_q: float = 0.8):
+    """Train / validation / final-holdout masks by PaySim step. The holdout
+    (step > holdout cutoff) is the same future period as temporal_split."""
+    train_cut = int(X["step"].quantile(train_q))
+    holdout_cut = int(X["step"].quantile(holdout_q))
+    train = X["step"] <= train_cut
+    validation = (X["step"] > train_cut) & (X["step"] <= holdout_cut)
+    holdout = X["step"] > holdout_cut
+    return (train_cut, holdout_cut), train, validation, holdout
+
+
+def swap_feature(target, donor, column: str, seed: int = 0):
+    """Copy of `target` with `column` replaced by values resampled from `donor`."""
+    import numpy as np
+
+    rng = np.random.default_rng(seed)
+    swapped = target.copy()
+    swapped[column] = rng.choice(donor[column].to_numpy(), size=len(target), replace=True)
+    return swapped
+
+
+VARIANTS = {
+    "all_features": lambda X: X,
+    # `step` held constant: the forest cannot split on it.
+    "without_step": lambda X: X.assign(step=0),
+}
+
+
+def temporal_study() -> dict:
+    """Leak-free chronological comparison.
+
+    Selection (variant choice, cause analysis) uses train -> validation only.
+    The final holdout is scored once per variant, after selection, with models
+    refit on train+validation and thresholds from train+validation OOF.
+    """
+    import numpy as np
+    from scipy.stats import ks_2samp
+    from sklearn.base import clone
+
+    X, y, deployed = load_data()
+    (train_cut, holdout_cut), train, validation, holdout = chronological_splits(X)
+    fraud = list(deployed.classes_).index(1)
+    numeric = ["step", "amount", "oldbalanceOrg", "oldbalanceDest", "orig_txn_count_before", "dest_txn_count_before"]
+
+    def fit_threshold_score(variant, fit_mask, eval_mask):
+        transform = VARIANTS[variant]
+        Xv = transform(X)
+        threshold = select_f1_threshold(y[fit_mask], oof_probabilities(clone(deployed), Xv[fit_mask], y[fit_mask]))
+        model = clone(deployed).fit(Xv[fit_mask], y[fit_mask])
+        p = model.predict_proba(Xv[eval_mask])[:, fraud]
+        return model, threshold, p
+
+    # 1. Selection stage: train -> validation.
+    selection, base_model, base_threshold = {}, None, None
+    for variant in VARIANTS:
+        model, threshold, p = fit_threshold_score(variant, train, validation)
+        selection[variant] = classification_metrics(y[validation].to_numpy(), p, threshold)
+        if variant == "all_features":
+            base_model, base_threshold, p_val = model, threshold, p
+    chosen = max(selection, key=lambda v: selection[v]["average_precision"] or 0)
+
+    # 2. Cause analysis on validation only: swap one feature at a time in the
+    # validation fraud rows for values drawn from training fraud rows.
+    val_fraud = X[validation & (y == 1)]
+    train_fraud = X[train & (y == 1)]
+    p_val_fraud = base_model.predict_proba(val_fraud)[:, fraud]
+    swaps = {}
+    for column in numeric + ["type"]:
+        p = base_model.predict_proba(swap_feature(val_fraud, train_fraud, column))[:, fraud]
+        swaps[column] = {
+            "median_probability": round(float(np.median(p)), 4),
+            "at_or_above_threshold": int((p >= base_threshold).sum()),
+        }
+
+    drift = {}
+    for column in numeric:
+        stat = ks_2samp(X.loc[train, column], X.loc[validation, column]).statistic
+        drift[column] = {
+            "ks_all_rows_train_vs_validation": round(float(stat), 3),
+            "train_range": [float(X.loc[train, column].min()), float(X.loc[train, column].max())],
+            "validation_median": float(X.loc[validation, column].median()),
+            "train_median": float(X.loc[train, column].median()),
+        }
+
+    # 3. Final holdout, scored once per variant after selection.
+    final = {}
+    for variant in VARIANTS:
+        _, threshold, p = fit_threshold_score(variant, train | validation, holdout)
+        final[variant] = classification_metrics(y[holdout].to_numpy(), p, threshold)
+
+    return {
+        "splits": {
+            "train_steps": f"1-{train_cut}",
+            "validation_steps": f"{train_cut + 1}-{holdout_cut}",
+            "holdout_steps": f"> {holdout_cut}",
+            "fraud_rows": {
+                "train": int(y[train].sum()),
+                "validation": int(y[validation].sum()),
+                "holdout": int(y[holdout].sum()),
+            },
+            "prevalence": {
+                "train": round(float(y[train].mean()), 5),
+                "validation": round(float(y[validation].mean()), 5),
+                "holdout": round(float(y[holdout].mean()), 5),
+            },
+        },
+        "selection_on_validation": selection,
+        "selected_variant": chosen,
+        "validation_cause_analysis": {
+            "baseline_threshold": round(base_threshold, 6),
+            "validation_fraud_rows": int(len(val_fraud)),
+            "baseline": {
+                "median_probability": round(float(np.median(p_val_fraud)), 4),
+                "at_or_above_threshold": int((p_val_fraud >= base_threshold).sum()),
+            },
+            "swap_one_feature_from_training_fraud_rows": swaps,
+            "feature_drift": drift,
+            "type_mix_fraud": {
+                "train": X.loc[train & (y == 1), "type"].value_counts().to_dict(),
+                "validation": X.loc[validation & (y == 1), "type"].value_counts().to_dict(),
+            },
+        },
+        "final_holdout_scored_once": final,
+        "notes": [
+            "Hyperparameters are the deployed configuration, tuned on the random split (which includes later steps): a residual, documented leak.",
+            "Holdout labels were not used for variant choice, thresholds or cause analysis.",
+        ],
     }
 
 
@@ -331,6 +482,7 @@ def main() -> None:
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("model")
     sub.add_parser("temporal-diagnostics")
+    sub.add_parser("temporal-study")
     latency = sub.add_parser("latency")
     latency.add_argument("--url", default="https://mulewatch.onrender.com")
     latency.add_argument("-n", type=int, default=50)
@@ -342,6 +494,8 @@ def main() -> None:
         result = evaluate_model()
     elif args.command == "temporal-diagnostics":
         result = temporal_diagnostics()
+    elif args.command == "temporal-study":
+        result = temporal_study()
     elif args.command == "latency":
         result = measure_latency(args.url, args.n, args.timeout)
     else:

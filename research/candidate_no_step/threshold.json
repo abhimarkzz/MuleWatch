@@ -1,0 +1,12 @@
+{
+  "threshold": 0.7121533833249737,
+  "features": [
+    "amount",
+    "oldbalanceOrg",
+    "oldbalanceDest",
+    "orig_txn_count_before",
+    "dest_txn_count_before",
+    "dest_is_merchant",
+    "type"
+  ]
+}

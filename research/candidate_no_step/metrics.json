@@ -1,0 +1,159 @@
+{
+  "generated_at": "2026-10-23T12:07:16.662460+00:00",
+  "protocol": "Research only: both with-step and without-step Random Forest variants receive identical chronological tuning (same forward-chaining folds, search space, budget and seed) and max-F1 thresholds from training-period forward-chaining out-of-fold predictions; both are frozen before a single scoring of the future holdout.",
+  "training_steps": "1-355",
+  "holdout_steps": "356-737",
+  "training_rows": 80256,
+  "training_fraud_rows": 67,
+  "holdout_rows": 19744,
+  "holdout_fraud_rows": 62,
+  "chronological_fold_fraud_rows": [
+    14,
+    22,
+    9
+  ],
+  "candidate_features": [
+    "amount",
+    "oldbalanceOrg",
+    "oldbalanceDest",
+    "orig_txn_count_before",
+    "dest_txn_count_before",
+    "dest_is_merchant",
+    "type"
+  ],
+  "variants": {
+    "with_step": {
+      "features": [
+        "step",
+        "amount",
+        "oldbalanceOrg",
+        "oldbalanceDest",
+        "orig_txn_count_before",
+        "dest_txn_count_before",
+        "dest_is_merchant",
+        "type"
+      ],
+      "best_params": {
+        "n_estimators": 250,
+        "min_samples_split": 5,
+        "min_samples_leaf": 1,
+        "max_features": "sqrt",
+        "max_depth": null,
+        "class_weight": "balanced"
+      },
+      "chronological_cv_average_precision": 0.4951,
+      "threshold": 0.171903
+    },
+    "without_step": {
+      "features": [
+        "amount",
+        "oldbalanceOrg",
+        "oldbalanceDest",
+        "orig_txn_count_before",
+        "dest_txn_count_before",
+        "dest_is_merchant",
+        "type"
+      ],
+      "best_params": {
+        "n_estimators": 150,
+        "min_samples_split": 10,
+        "min_samples_leaf": 4,
+        "max_features": 0.7,
+        "max_depth": 30,
+        "class_weight": "balanced"
+      },
+      "chronological_cv_average_precision": 0.5157,
+      "threshold": 0.712153
+    }
+  },
+  "search": {
+    "iterations": 8,
+    "random_state": 42,
+    "space": {
+      "classifier__n_estimators": [
+        150,
+        250,
+        350
+      ],
+      "classifier__class_weight": [
+        null,
+        "balanced",
+        "balanced_subsample"
+      ],
+      "classifier__max_depth": [
+        null,
+        12,
+        20,
+        30
+      ],
+      "classifier__min_samples_split": [
+        2,
+        5,
+        10
+      ],
+      "classifier__min_samples_leaf": [
+        1,
+        2,
+        4
+      ],
+      "classifier__max_features": [
+        "sqrt",
+        0.7
+      ]
+    }
+  },
+  "threshold_source": "max-F1 on forward-chaining out-of-fold probabilities, training period only",
+  "holdout_results": {
+    "with_step": {
+      "rows": 19744,
+      "fraud_rows": 62,
+      "threshold": 0.171903,
+      "precision": 0.963,
+      "recall": 0.4194,
+      "f1": 0.5843,
+      "confusion_matrix": {
+        "tn": 19681,
+        "fp": 1,
+        "fn": 36,
+        "tp": 26
+      },
+      "roc_auc": 0.8519,
+      "average_precision": 0.6225
+    },
+    "without_step": {
+      "rows": 19744,
+      "fraud_rows": 62,
+      "threshold": 0.712153,
+      "precision": 0.7838,
+      "recall": 0.4677,
+      "f1": 0.5859,
+      "confusion_matrix": {
+        "tn": 19674,
+        "fp": 8,
+        "fn": 33,
+        "tp": 29
+      },
+      "roc_auc": 0.9307,
+      "average_precision": 0.6155
+    }
+  },
+  "paired_bootstrap_without_step_minus_with_step": {
+    "f1": {
+      "mean_difference": 0.0018,
+      "ci95": [
+        -0.0704,
+        0.0714
+      ],
+      "resamples": 1000
+    },
+    "average_precision": {
+      "mean_difference": -0.0074,
+      "ci95": [
+        -0.0586,
+        0.0444
+      ],
+      "resamples": 1000
+    }
+  },
+  "note": "Fair comparison: both variants tuned, thresholded and frozen identically on the training period. The production artefact (trained on steps 1-737) is not used; its holdout score would be in-sample."
+}
