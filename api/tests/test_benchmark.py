@@ -35,3 +35,24 @@ def test_roc_auc_is_undefined_for_one_class():
     m = classification_metrics(np.array([0, 0, 0]), np.array([0.1, 0.7, 0.2]), threshold=0.5)
     assert m["roc_auc"] is None and m["average_precision"] is None
     assert m["confusion_matrix"]["fp"] == 1
+
+
+def test_select_f1_threshold_picks_the_best_f1_cut():
+    from scripts.benchmark import select_f1_threshold
+
+    y = np.array([0, 0, 0, 1, 1, 0, 1])
+    p = np.array([0.1, 0.2, 0.3, 0.6, 0.7, 0.65, 0.9])
+    # Cut at 0.6 catches all three frauds with one false positive (F1 0.857),
+    # better than any higher cut.
+    assert select_f1_threshold(y, p) == pytest.approx(0.6)
+
+
+def test_temporal_split_never_overlaps():
+    import pandas as pd
+    from scripts.benchmark import temporal_split
+
+    X = pd.DataFrame({"step": list(range(1, 101))})
+    cutoff, early, late = temporal_split(X)
+    assert cutoff == 80
+    assert X.loc[early, "step"].max() <= cutoff < X.loc[late, "step"].min()
+    assert not (early & late).any() and (early | late).all()
